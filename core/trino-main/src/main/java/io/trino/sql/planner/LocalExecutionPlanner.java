@@ -3579,9 +3579,6 @@ public class LocalExecutionPlanner
             int writerCount = node.getPartitioningScheme()
                     .map(_ -> getTaskMaxWriterCount(session))
                     .orElseGet(() -> getTaskMinWriterCount(session));
-            if (isSingleGatheringExchange(node.getSource())) {
-                writerCount = 1;
-            }
             context.setDriverInstanceCount(writerCount);
 
             PhysicalOperation source = node.getSource().accept(this, context);
