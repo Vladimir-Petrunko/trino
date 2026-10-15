@@ -82,8 +82,6 @@ public class TestYdbConnectorTest
                  SUPPORTS_AGGREGATION_PUSHDOWN_COVARIANCE,
                  SUPPORTS_AGGREGATION_PUSHDOWN_CORRELATION,
                  SUPPORTS_AGGREGATION_PUSHDOWN_REGRESSION,
-                 SUPPORTS_TOPN_PUSHDOWN,
-                 SUPPORTS_LIMIT_PUSHDOWN,
                  SUPPORTS_CREATE_VIEW,
                  SUPPORTS_CREATE_SCHEMA,
                  SUPPORTS_RENAME_SCHEMA,
@@ -109,6 +107,8 @@ public class TestYdbConnectorTest
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
             case SUPPORTS_ADD_COLUMN,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
+                 SUPPORTS_TOPN_PUSHDOWN,
+                 SUPPORTS_LIMIT_PUSHDOWN,
                  SUPPORTS_DROP_COLUMN,
                  SUPPORTS_RENAME_TABLE,
                  SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
