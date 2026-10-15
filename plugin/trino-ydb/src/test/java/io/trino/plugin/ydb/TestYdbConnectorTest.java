@@ -217,6 +217,18 @@ public class TestYdbConnectorTest
 
     @Test
     @Override
+    public void testDropAndAddColumnWithSameName()
+    {
+        try (TestTable table = newTrinoTable("test_drop_add_column", "WITH (primary_key = ARRAY['x']) AS SELECT 1 x, 2 y, 3 z")) {
+            assertUpdate("ALTER TABLE " + table.getName() + " DROP COLUMN y");
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 3)");
+            assertUpdate("ALTER TABLE " + table.getName() + " ADD COLUMN y int");
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 3, NULL)");
+        }
+    }
+
+    @Test
+    @Override
     public void testDropNotNullConstraint()
     {
         try (TestTable table = newTrinoTable("test_drop_not_null_", "(id bigint NOT NULL, col integer NOT NULL) WITH (primary_key = ARRAY['id'])")) {
