@@ -29,9 +29,17 @@ import tech.ydb.jdbc.YdbDriver;
 
 import java.util.Properties;
 
+import static io.trino.plugin.jdbc.JdbcModule.bindTablePropertiesProvider;
+
 public class YdbClientModule
         extends AbstractModule
 {
+    @Override
+    protected void configure()
+    {
+        bindTablePropertiesProvider(binder(), YdbTableProperties.class);
+    }
+
     @Provides
     @Singleton
     @ForBaseJdbc

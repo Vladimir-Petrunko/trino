@@ -16,11 +16,15 @@ package io.trino.plugin.ydb;
 import io.trino.testing.BaseConnectorSmokeTest;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
+import io.trino.testing.sql.TestTable;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import tech.ydb.test.junit5.YdbHelperExtension;
+
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @ResourceLock("YDB_HELPER")
 public class TestYdbConnectorSmokeTest
@@ -43,7 +47,6 @@ public class TestYdbConnectorSmokeTest
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
-                 SUPPORTS_INSERT,
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
@@ -93,6 +96,38 @@ public class TestYdbConnectorSmokeTest
                    regionkey bigint,
                    name varchar,
                    comment varchar
+                )
+                WITH (
+                   primary_key = ARRAY['regionkey']
                 )""".formatted(catalog, schema));
+    }
+
+    // YQL requires a PRIMARY KEY; generic property-free CREATE is not the connector contract.
+    // https://ydb.tech/docs/en/yql/reference/syntax/create_table/
+    @Test
+    @Override
+    public void testCreateTable()
+    {
+        assertThat(query("CREATE TABLE create_without_primary_key (id bigint)"))
+                .failure().hasErrorCode(INVALID_TABLE_PROPERTY);
+    }
+
+    @Test
+    @Override
+    public void testCreateTableAsSelect()
+    {
+        assertThat(query("CREATE TABLE ctas_without_primary_key AS SELECT BIGINT '42' id"))
+                .failure().hasErrorCode(INVALID_TABLE_PROPERTY);
+    }
+
+    @Test
+    @Override
+    public void testInsert()
+    {
+        try (TestTable table = newTrinoTable("test_insert_", "(a bigint, b double) WITH (primary_key = ARRAY['a'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + " (a, b) VALUES (42, -38.5), (13, 99.9)", 2);
+            assertThat(query("SELECT CAST(a AS bigint), b FROM " + table.getName()))
+                    .matches(expectedValues("(42, -38.5), (13, 99.9)"));
+        }
     }
 }
