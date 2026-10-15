@@ -97,6 +97,9 @@ after the write succeeds. Query and task retries are not supported.
 
 The JDBC `non_transactional_insert` session property bypasses staging when
 explicitly enabled. In that mode, completed batches can remain after a failure.
+Every INSERT in that mode must explicitly supply all primary-key columns,
+including nullable key columns. Default staged INSERT supplies NULL for an
+omitted nullable primary-key column.
 
 ## Limitations
 

@@ -15,6 +15,7 @@ package io.trino.plugin.ydb;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.io.Closer;
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
 import io.trino.plugin.base.mapping.IdentifierMapping;
@@ -24,6 +25,7 @@ import io.trino.plugin.jdbc.BooleanWriteFunction;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
+import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongWriteFunction;
@@ -43,12 +45,14 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import jakarta.annotation.Nullable;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
@@ -61,12 +65,13 @@ import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
+import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.isNonTransactionalInsert;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.booleanColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
@@ -261,6 +266,14 @@ public class YdbClient
                 FULL_PUSHDOWN);
     }
 
+    private static ColumnMapping booleanColumnMapping()
+    {
+        return ColumnMapping.booleanMapping(
+                BOOLEAN,
+                ResultSet::getBoolean,
+                BooleanWriteFunction.of(Types.BOOLEAN, PreparedStatement::setBoolean));
+    }
+
     @Override
     protected String quoted(@Nullable String catalog, @Nullable String schema, String table)
     {
@@ -417,19 +430,15 @@ public class YdbClient
     public List<JdbcColumnHandle> getPrimaryKeys(ConnectorSession session, RemoteTableName remoteTableName)
     {
         String tableName = remoteTableName.getTableName();
-        String metadataSchemaName = remoteTableName.getSchemaName().orElse(null);
-        SchemaTableName schemaTableName = new SchemaTableName(
-                remoteTableName.getSchemaName().orElse(DEFAULT_SCHEMA),
-                tableName);
-        List<JdbcColumnHandle> columns = getColumnsForPrimaryKeyLookup(session, schemaTableName, remoteTableName);
+        SchemaTableName schemaTableName = new SchemaTableName(DEFAULT_SCHEMA, tableName);
+        RemoteTableName metadataTable = new RemoteTableName(Optional.empty(), Optional.empty(), tableName);
+        List<JdbcColumnHandle> columns = getColumnsForPrimaryKeyLookup(session, schemaTableName, metadataTable);
         Map<String, JdbcColumnHandle> columnsByName = columns.stream()
                 .collect(Collectors.toMap(JdbcColumnHandle::getColumnName, Function.identity()));
 
         try (Connection connection = getConnection(session)) {
             DatabaseMetaData metaData = connection.getMetaData();
-            String catalogName = remoteTableName.getCatalogName().orElse(null);
-
-            try (ResultSet primaryKeyResultSet = metaData.getPrimaryKeys(catalogName, metadataSchemaName, tableName)) {
+            try (ResultSet primaryKeyResultSet = metaData.getPrimaryKeys(null, null, tableName)) {
                 Map<Short, JdbcColumnHandle> primaryKeysBySequence = new TreeMap<>();
 
                 while (primaryKeyResultSet.next()) {
@@ -465,6 +474,63 @@ public class YdbClient
     }
 
     @Override
+    public JdbcOutputTableHandle beginInsertTable(ConnectorSession session, JdbcTableHandle tableHandle, List<JdbcColumnHandle> columns)
+    {
+        if (isNonTransactionalInsert(session)) {
+            Set<String> columnNames = columns.stream()
+                    .map(JdbcColumnHandle::getColumnName)
+                    .collect(Collectors.toSet());
+            if (getPrimaryKeys(session, tableHandle.getRequiredNamedRelation().getRemoteTableName()).stream()
+                    .anyMatch(column -> !columnNames.contains(column.getColumnName()))) {
+                throw new TrinoException(NOT_SUPPORTED, "Non-transactional YDB inserts require all primary-key columns");
+            }
+        }
+        return super.beginInsertTable(session, tableHandle, columns);
+    }
+
+    @Override
+    public void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds)
+    {
+        if (isNonTransactionalInsert(session)) {
+            super.finishInsertTable(session, handle, pageSinkIds);
+            return;
+        }
+
+        List<JdbcColumnHandle> missingKeys = getPrimaryKeys(session, handle.getRemoteTableName()).stream()
+                .filter(column -> !handle.getColumnNames().contains(column.getColumnName()))
+                .toList();
+        if (missingKeys.isEmpty()) {
+            super.finishInsertTable(session, handle, pageSinkIds);
+            return;
+        }
+
+        RemoteTableName temporaryTable = new RemoteTableName(
+                handle.getRemoteTableName().getCatalogName(),
+                handle.getRemoteTableName().getSchemaName(),
+                handle.getTemporaryTableName().orElseThrow());
+        try (Closer closer = Closer.create()) {
+            closer.register(() -> dropTable(session, temporaryTable, true));
+            try (Connection connection = getConnection(session, handle)) {
+                verify(connection.getAutoCommit());
+                List<String> columns = new ArrayList<>(handle.getColumnNames().stream().map(this::quoted).toList());
+                List<String> projections = new ArrayList<>(columns);
+                for (JdbcColumnHandle key : missingKeys) {
+                    columns.add(quoted(key.getColumnName()));
+                    projections.add("CAST(NULL AS " + key.getJdbcTypeHandle().jdbcTypeName().orElseThrow() + ") AS " + quoted(key.getColumnName()));
+                }
+                execute(session, connection, "INSERT INTO %s (%s) SELECT %s FROM %s".formatted(
+                        quoted(handle.getRemoteTableName()),
+                        String.join(", ", columns),
+                        String.join(", ", projections),
+                        quoted(temporaryTable)));
+            }
+        }
+        catch (IOException | SQLException e) {
+            throw new TrinoException(JDBC_ERROR, "Failed to publish YDB INSERT staging table", e);
+        }
+    }
+
+    @Override
     protected void copyTableSchema(
             ConnectorSession session,
             Connection connection,
@@ -488,7 +554,7 @@ public class YdbClient
             if (nativeType.equalsIgnoreCase("Decimal")) {
                 nativeType = toWriteMapping(session, column.getColumnType()).getDataType();
             }
-            return quoted(name) + " " + nativeType;
+            return quoted(name) + " " + nativeType + (column.isNullable() ? "" : " NOT NULL");
         }).collect(joining(", "));
         String sql = "CREATE TABLE %s (%s, %s Serial, PRIMARY KEY (%s))".formatted(
                 quoted(newTableName), declarations, quoted(stagingKey), quoted(stagingKey));

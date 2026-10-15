@@ -17,6 +17,7 @@ import com.google.inject.AbstractModule;
 import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import com.google.inject.util.Modules;
+import io.trino.Session;
 import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
@@ -32,6 +33,7 @@ import io.trino.testing.sql.JdbcSqlExecutor;
 import io.trino.testing.sql.TestTable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import tech.ydb.test.junit5.YdbHelperExtension;
 
@@ -44,8 +46,10 @@ import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
 @ResourceLock("YDB_HELPER")
+@Execution(SAME_THREAD)
 public class TestYdbCreateTable
         extends AbstractTestQueryFramework
 {
@@ -160,6 +164,24 @@ public class TestYdbCreateTable
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS " + table);
+        }
+    }
+
+    @Test
+    public void testNonTransactionalInsertRequiresExplicitKeys()
+    {
+        Session nonTransactional = Session.builder(getSession())
+                .setCatalogSessionProperty("local", "non_transactional_insert", "true")
+                .build();
+        try (TestTable table = newTrinoTable(
+                "non_transactional_keys_",
+                "(payload varchar, id bigint, tenant bigint) WITH (primary_key = ARRAY['id', 'tenant'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + " (payload, id) VALUES ('staged', 1)", 1);
+            assertUpdate(nonTransactional, "INSERT INTO " + table.getName() + " VALUES ('direct', 2, 2)", 1);
+            assertThat(query(nonTransactional, "INSERT INTO " + table.getName() + " (payload, id) VALUES ('rejected', 3)"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertQuery("SELECT * FROM " + table.getName(),
+                    "VALUES ('staged', CAST(1 AS BIGINT), CAST(NULL AS BIGINT)), ('direct', CAST(2 AS BIGINT), CAST(2 AS BIGINT))");
         }
     }
 

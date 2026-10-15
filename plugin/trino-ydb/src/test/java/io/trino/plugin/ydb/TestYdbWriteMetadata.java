@@ -94,9 +94,28 @@ public class TestYdbWriteMetadata
                     case "close" -> null;
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
-        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(DatabaseMetaData.class.getClassLoader(), new Class<?>[] {DatabaseMetaData.class},
+        AtomicBoolean firstKey = new AtomicBoolean(true);
+        ResultSet keys = (ResultSet) Proxy.newProxyInstance(ResultSet.class.getClassLoader(), new Class<?>[] {ResultSet.class},
                 (_, method, _) -> switch (method.getName()) {
-                    case "getColumns" -> result;
+                    case "next" -> firstKey.getAndSet(false);
+                    case "getString" -> "payload";
+                    case "getShort" -> (short) 1;
+                    case "close" -> null;
+                    default -> throw new UnsupportedOperationException(method.getName());
+                });
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(DatabaseMetaData.class.getClassLoader(), new Class<?>[] {DatabaseMetaData.class},
+                (_, method, args) -> switch (method.getName()) {
+                    case "getColumns" -> {
+                        assertThat(args[0]).isNull();
+                        assertThat(args[1]).isNull();
+                        firstRow.set(true);
+                        yield result;
+                    }
+                    case "getPrimaryKeys" -> {
+                        assertThat(args[0]).isNull();
+                        assertThat(args[1]).isNull();
+                        yield keys;
+                    }
                     case "getSearchStringEscape" -> "\\";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
@@ -114,7 +133,7 @@ public class TestYdbWriteMetadata
                 (_, method, _) -> switch (method.getName()) {
                     case "getMetaData" -> metadata;
                     case "createStatement" -> statement;
-                    case "close" -> null;
+                    case "setReadOnly", "close" -> null;
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
         YdbClient client = new YdbClient(
@@ -123,6 +142,9 @@ public class TestYdbWriteMetadata
                 new DefaultQueryBuilder(RemoteQueryModifier.NONE),
                 new DefaultIdentifierMapping(),
                 RemoteQueryModifier.NONE);
+        assertThat(client.getPrimaryKeys(SESSION, new RemoteTableName(Optional.of("catalog"), Optional.of("default"), "source")))
+                .extracting(column -> column.getColumnName())
+                .containsExactly("payload");
         try (Connection target = connection.get()) {
             client.copyTableSchema(SESSION, target, null, "default", "source", "staging", List.of("payload"));
         }
