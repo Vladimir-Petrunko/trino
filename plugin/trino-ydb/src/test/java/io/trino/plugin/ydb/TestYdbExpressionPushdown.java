@@ -56,7 +56,9 @@ public class TestYdbExpressionPushdown
             assertThat(query("SELECT s || '!' FROM " + table.getName()))
                     .matches("VALUES CAST('\u00C9\uD83D\uDE00!' AS varchar), CAST('CAF\u00C9!' AS varchar), NULL, CAST('!' AS varchar), NULL")
                     .isNotFullyPushedDown(ProjectNode.class);
-            assertThat(query("SELECT s || repeat('x', " + DEFAULT_MAX_PAGE_SIZE_IN_BYTES + ") FROM " + table.getName() + " WHERE id = 1"))
+            assertThat(query("SELECT length(lpad('', " + DEFAULT_MAX_PAGE_SIZE_IN_BYTES + ", 'x'))"))
+                    .matches("VALUES BIGINT '" + DEFAULT_MAX_PAGE_SIZE_IN_BYTES + "'");
+            assertThat(query("SELECT s || lpad('', " + DEFAULT_MAX_PAGE_SIZE_IN_BYTES + ", 'x') FROM " + table.getName() + " WHERE id = 1"))
                     .failure().hasErrorCode(INVALID_FUNCTION_ARGUMENT);
             Session disabledSession = Session.builder(getSession())
                     .setCatalogSessionProperty("local", "complex_expression_pushdown", "false")

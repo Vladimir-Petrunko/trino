@@ -15,6 +15,7 @@ package io.trino.plugin.ydb;
 
 import io.trino.Session;
 import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.JdbcSqlExecutor;
@@ -31,6 +32,8 @@ import java.sql.SQLException;
 import java.util.List;
 
 import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @ResourceLock("YDB_HELPER")
@@ -57,7 +60,7 @@ public class TestYdbAggregationPushdown
                     .isFullyPushedDown();
             assertThat(query(disabledSession(), sql))
                     .matches(getSession(), sql)
-                    .isNotFullyPushedDown(AggregationNode.class);
+                    .matches(anyTree(node(AggregationNode.class, anyTree(node(TableScanNode.class)))));
             assertThat(query("SELECT s, count(*) FROM " + table.getName() + " GROUP BY s"))
                     .matches("VALUES (CAST('A' AS varchar), BIGINT '2'), (CAST('a' AS varchar), BIGINT '1'), (CAST(NULL AS varchar), BIGINT '1')")
                     .isFullyPushedDown();
