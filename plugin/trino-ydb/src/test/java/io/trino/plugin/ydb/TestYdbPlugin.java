@@ -15,6 +15,7 @@ package io.trino.plugin.ydb;
 
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.testing.TestingConnectorContext;
 import org.junit.jupiter.api.Test;
 
@@ -24,6 +25,7 @@ import java.util.Map;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.spi.connector.ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 public class TestYdbPlugin
 {
@@ -39,6 +41,9 @@ public class TestYdbPlugin
             try {
                 assertThat(connector.getPageSourceProvider()).isNotNull();
                 assertThat(connector.getCapabilities()).contains(NOT_NULL_COLUMN_CONSTRAINT);
+                assertThat(connector.getSessionProperties())
+                        .extracting(PropertyMetadata::getName, PropertyMetadata::getDefaultValue)
+                        .contains(tuple("join_pushdown_enabled", false), tuple("complex_join_pushdown_enabled", false));
             }
             finally {
                 connector.shutdown();
