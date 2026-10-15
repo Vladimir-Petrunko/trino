@@ -117,6 +117,40 @@ public class TestYdbConnectorTest
     }
 
     @Override
+    protected String createTableSqlForAddingAndDroppingColumn(String tableName, String columnNameInSql)
+    {
+        return super.createTableSqlForAddingAndDroppingColumn(tableName, columnNameInSql) + " WITH (primary_key = ARRAY['value'])";
+    }
+
+    @Test
+    @Override
+    public void testAlterTableAddLongColumnName()
+    {
+        String tableName = "test_long_column" + randomNameSuffix();
+        String createTable = "CREATE TABLE " + tableName + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x";
+        String validColumnName = "col" + "z".repeat(maxColumnNameLength().orElseThrow() - 3);
+        assertUpdate(createTable, 1);
+        try {
+            assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN " + validColumnName + " int");
+            assertThat(getQueryRunner().tableExists(getSession(), tableName)).isTrue();
+            assertQuery("SELECT x FROM " + tableName, "VALUES 123");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+
+        assertUpdate(createTable, 1);
+        try {
+            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN " + validColumnName + "z int"))
+                    .satisfies(this::verifyColumnNameLengthFailurePermissible);
+            assertQuery("SELECT x FROM " + tableName, "VALUES 123");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Override
     protected void verifyConcurrentAddColumnFailurePermissible(Exception exception)
     {
         // Overlapping YDB scheme operations on one table may report OVERLOADED.
@@ -194,7 +228,7 @@ public class TestYdbConnectorTest
             assertUpdate("ALTER TABLE " + table.getName() + " ALTER COLUMN col DROP NOT NULL");
             assertThat(columnIsNullable(table.getName(), "col")).isTrue();
             assertUpdate("INSERT INTO " + table.getName() + " VALUES (1, NULL)", 1);
-            assertQuery("SELECT id, col FROM " + table.getName(), "VALUES (BIGINT '1', NULL)");
+            assertQuery("SELECT id, col FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), NULL)");
         }
     }
 
