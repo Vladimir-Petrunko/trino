@@ -124,6 +124,8 @@ and modulus can be pushed down for a nonzero constant divisor other than `-1`.
 Arithmetic that can overflow or divide by zero, general arithmetic expressions,
 varchar concatenation, `LIKE`, and unsupported functions remain in Trino.
 Concatenation retains Trino's result-length limit and error behavior.
+Bounded `varchar` projections also remain in Trino because YDB text result
+columns map to unbounded `varchar`.
 Expressions over unsigned,
 floating-point, native decimal, date, and legacy temporal columns also remain
 in Trino where native value or comparison semantics differ. Disabling the JDBC

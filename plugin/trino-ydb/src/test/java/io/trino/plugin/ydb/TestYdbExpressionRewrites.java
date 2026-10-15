@@ -44,6 +44,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -132,6 +133,20 @@ public class TestYdbExpressionRewrites
                 table,
                 new Call(VARCHAR, new FunctionName("concat"), List.of(new Variable("v", VARCHAR), new Constant(utf8Slice("!"), VARCHAR))),
                 Map.of("v", column))).isEmpty();
+    }
+
+    @Test
+    public void testBoundedVarcharProjectionRemainsInTrino()
+    {
+        JdbcTableHandle table = new JdbcTableHandle(
+                new SchemaTableName("default", "test"),
+                new RemoteTableName(Optional.empty(), Optional.empty(), "test"),
+                Optional.empty());
+        assertThat(client.convertProjection(
+                SESSION,
+                table,
+                new Constant(utf8Slice("!"), createVarcharType(1)),
+                Map.of())).isEmpty();
     }
 
     @Test
