@@ -87,13 +87,12 @@ public class TestYdbConnectorSmokeTest
     {
         String catalog = getSession().getCatalog().orElseThrow();
         String schema = getSession().getSchema().orElseThrow();
-        Assertions.assertThat(computeScalar("SHOW CREATE TABLE region")).isEqualTo(String.format(
-                "CREATE TABLE %s.%s.region (\n" +
-                        "   regionkey bigint,\n" +
-                        "   name varchar,\n" +
-                        "   comment varchar\n" +
-                        ")",
-                catalog,
-                schema));
+        Assertions.assertThat(computeScalar("SHOW CREATE TABLE region")).isEqualTo(
+                """
+                CREATE TABLE %s.%s.region (
+                   regionkey bigint,
+                   name varchar,
+                   comment varchar
+                )""".formatted(catalog, schema));
     }
 }
