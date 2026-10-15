@@ -185,10 +185,11 @@ public class TestYdbConnectorTest
         try (TestTable table = new TestTable(
                 executor,
                 "native_types_",
-                "(id Int64, u Uint64, s Utf8, b String, d Date32, t Timestamp64, n Decimal(22,9), PRIMARY KEY (id))",
-                List.of("1, 18446744073709551615ul, 'hello'u, String('\\x00\\x80\\xff'), Date32('1969-12-31'), " +
-                                "Timestamp64('1969-12-31T23:59:59.999999Z'), Decimal('1.25', 22, 9)",
-                        "2, NULL, NULL, NULL, NULL, NULL, NULL"))) {
+                "(id Int64, u Uint64, s Utf8, b String, d Date32, t Timestamp64, n Decimal(22,9), PRIMARY KEY (id))")) {
+            executor.execute("INSERT INTO " + table.getName() + " (id, u, s, b, d, t, n) VALUES " +
+                    "(1, 18446744073709551615ul, 'hello'u, String('\\x00\\x80\\xff'), Date32('1969-12-31'), " +
+                    "Timestamp64('1969-12-31T23:59:59.999999Z'), Decimal('1.25', 22, 9)), " +
+                    "(2, NULL, NULL, NULL, NULL, NULL, NULL)");
             assertQuery("SELECT id, u, s, b, d, t, n FROM " + table.getName(),
                     "VALUES (BIGINT '1', DECIMAL '18446744073709551615', 'hello', X'0080FF', DATE '1969-12-31', " +
                             "TIMESTAMP '1969-12-31 23:59:59.999999', CAST('1.25' AS DECIMAL(22,9))), " +
@@ -203,8 +204,8 @@ public class TestYdbConnectorTest
         try (TestTable table = new TestTable(
                 executor,
                 "read_only_",
-                "(id Int64, value Utf8, PRIMARY KEY (id))",
-                List.of("1, 'original'u"))) {
+                "(id Int64, value Utf8, PRIMARY KEY (id))")) {
+            executor.execute("INSERT INTO " + table.getName() + " (id, value) VALUES (1, 'original'u)");
             String copy = table.getName() + "_copy";
             try {
                 for (String sql : List.of(
