@@ -20,6 +20,7 @@ import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
+import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.Constant;
@@ -79,6 +80,21 @@ public class TestYdbExpressionRewrites
         var result = client.convertProjection(SESSION, table, expression, Map.of()).orElseThrow();
         assertThat(result.getParameters()).extracting(parameter -> parameter.getValue().orElseThrow())
                 .containsExactly(utf8Slice("hello"), utf8Slice("ll"), utf8Slice("hello"), utf8Slice("ll"));
+    }
+
+    @Test
+    public void testQualifiedStringPositionIsNotRewritten()
+    {
+        JdbcTableHandle table = new JdbcTableHandle(
+                new SchemaTableName("default", "test"),
+                new RemoteTableName(Optional.empty(), Optional.empty(), "test"),
+                Optional.empty());
+        FunctionName function = new FunctionName(Optional.of(new CatalogSchemaName("other", "schema")), "strpos");
+        assertThat(client.convertProjection(
+                SESSION,
+                table,
+                new Call(BIGINT, function, List.of(new Constant(utf8Slice("hello"), VARCHAR), new Constant(utf8Slice("ll"), VARCHAR))),
+                Map.of())).isEmpty();
     }
 
     @Test

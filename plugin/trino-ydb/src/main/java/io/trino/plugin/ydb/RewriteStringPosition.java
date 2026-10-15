@@ -24,6 +24,7 @@ import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.FunctionName;
 import io.trino.spi.type.BigintType;
 import org.jspecify.annotations.NonNull;
 
@@ -52,7 +53,7 @@ public class RewriteStringPosition
     private static final String STRPOS_OPERATOR = "strpos";
 
     private static final Pattern<Call> PATTERN = call()
-            .with(functionName().matching(name -> STRPOS_OPERATOR.equals(name.getName())))
+            .with(functionName().matching(name -> name.equals(new FunctionName(STRPOS_OPERATOR))))
             .with(argumentCount().equalTo(2))
             .with(argument(0).matching(expression().capturedAs(STRING)))
             .with(argument(1).matching(expression().capturedAs(SUBSTRING)));
