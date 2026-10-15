@@ -42,7 +42,19 @@ public class TestYdbConnectorSmokeTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         return switch (connectorBehavior) {
-            case SUPPORTS_CREATE_VIEW,
+            case SUPPORTS_CREATE_TABLE,
+                 SUPPORTS_INSERT,
+                 SUPPORTS_UPDATE,
+                 SUPPORTS_DELETE,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
+                 SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
+                 SUPPORTS_AGGREGATION_PUSHDOWN,
+                 SUPPORTS_TOPN_PUSHDOWN,
+                 SUPPORTS_LIMIT_PUSHDOWN,
+                 SUPPORTS_CREATE_VIEW,
                  SUPPORTS_CREATE_SCHEMA,
                  SUPPORTS_RENAME_SCHEMA,
                  SUPPORTS_SET_COLUMN_TYPE,
@@ -65,7 +77,6 @@ public class TestYdbConnectorSmokeTest
                  SUPPORTS_SET_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
-            case SUPPORTS_TOPN_PUSHDOWN_WITH_VARCHAR -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
     }

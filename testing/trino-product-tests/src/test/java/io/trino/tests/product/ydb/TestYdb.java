@@ -19,14 +19,12 @@ import io.trino.tests.product.TestGroup;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * YDB CREATE TABLE AS SELECT test.
- */
 @ProductTest
 @RequiresEnvironment(YdbEnvironment.class)
 @TestGroup.Ydb
@@ -34,23 +32,31 @@ import static org.assertj.core.api.Assertions.assertThat;
 class TestYdb
 {
     @Test
-    void testCreateTableAsSelect(YdbEnvironment env)
+    void testReadTable(YdbEnvironment env)
             throws Exception
     {
-        try (Connection conn = env.createTrinoConnection();
-                Statement stmt = conn.createStatement()) {
-            int count = stmt.executeUpdate("CREATE TABLE ydb.default.nation " +
-                    "WITH (primary_key = ARRAY['nationkey']) AS SELECT * FROM tpch.tiny.nation");
+        try (Connection nativeConnection = env.createYdbConnection();
+                Statement nativeStatement = nativeConnection.createStatement()) {
+            nativeStatement.execute("CREATE TABLE nation (nationkey Int64, name Text, PRIMARY KEY (nationkey))");
             try {
-                assertThat(count).isEqualTo(25);
-
-                try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM ydb.default.nation")) {
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getLong(1)).isEqualTo(25);
+                try (PreparedStatement insert = nativeConnection.prepareStatement("UPSERT INTO nation (nationkey, name) VALUES (?, ?)")) {
+                    for (int key = 0; key < 25; key++) {
+                        insert.setLong(1, key);
+                        insert.setString(2, "nation_" + key);
+                        insert.addBatch();
+                    }
+                    insert.executeBatch();
+                }
+                try (Connection connection = env.createTrinoConnection();
+                        Statement statement = connection.createStatement();
+                        ResultSet rows = statement.executeQuery("SELECT COUNT(*) FROM ydb.default.nation")) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.getLong(1)).isEqualTo(25);
+                    assertThat(rows.next()).isFalse();
                 }
             }
             finally {
-                stmt.execute("DROP TABLE ydb.default.nation");
+                nativeStatement.execute("DROP TABLE nation");
             }
         }
     }

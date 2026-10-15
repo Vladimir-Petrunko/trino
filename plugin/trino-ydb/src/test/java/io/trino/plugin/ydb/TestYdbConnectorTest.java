@@ -13,7 +13,6 @@
  */
 package io.trino.plugin.ydb;
 
-import io.trino.Session;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.testing.BaseConnectorTest;
@@ -32,8 +31,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @ResourceLock("YDB_HELPER")
 public class TestYdbConnectorTest
@@ -63,94 +62,23 @@ public class TestYdbConnectorTest
         assertQueryFails("SELECT * FROM local.\"%\".orders", ".*Schema '%' does not exist");
     }
 
-    @Test
-    public void testPrimaryKeyNamedColumn()
-    {
-        try (TestTable table = newTrinoTable("primary_key_named_column_", "(\"primary_key\" bigint)")) {
-            assertUpdate("INSERT INTO " + table.getName() + " VALUES 7", 1);
-            assertQuery("SELECT \"primary_key\" FROM " + table.getName(), "VALUES 7");
-            // Quoting does not bypass YDB's column naming restrictions:
-            // https://ydb.tech/docs/en/concepts/datamodel/table#column-naming-rules
-            String invalidTable = table.getName() + "_invalid";
-            try {
-                assertQueryFails("CREATE TABLE " + invalidTable + " (\"primary key\" bigint)",
-                        "(?s).*Invalid name for user column 'primary key'.*");
-            }
-            finally {
-                assertUpdate("DROP TABLE IF EXISTS " + invalidTable);
-            }
-        }
-    }
-
-    @Test
-    public void testJoinPushdown()
-    {
-        Session session = Session.builder(getSession())
-                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "join_pushdown_enabled", "true")
-                .build();
-        try (TestTable left = newTrinoTable(
-                "join_int64_left_",
-                "(id bigint, k bigint, second_key bigint, d double, s varchar)",
-                List.of("1, 7, 1, 1.0, 'a'", "2, 7, 2, 2.0, 'b'", "3, NULL, 1, 3.0, 'c'", "4, 8, 1, 4.0, 'd'"));
-                TestTable right = newTrinoTable(
-                        "join_int64_right_",
-                        "(id bigint, k bigint, second_key bigint, d double, s varchar)",
-                        List.of("10, 7, 1, 1.0, 'a'", "11, 7, 2, 2.0, 'b'", "12, NULL, 1, 3.0, 'c'", "13, 9, 1, 4.0, 'd'"))) {
-            String join = "SELECT l.id, r.id FROM " + left.getName() + " l %s " + right.getName() + " r ON %s";
-            String matches = "VALUES (BIGINT '1', BIGINT '10'), (BIGINT '1', BIGINT '11'), " +
-                    "(BIGINT '2', BIGINT '10'), (BIGINT '2', BIGINT '11')";
-            assertThat(query(session, join.formatted("JOIN", "l.k = r.k"))).isFullyPushedDown().matches(matches);
-            assertThat(query(session, join.formatted("LEFT JOIN", "l.k = r.k"))).isFullyPushedDown()
-                    .matches(matches + ", (BIGINT '3', CAST(NULL AS BIGINT)), (BIGINT '4', CAST(NULL AS BIGINT))");
-            assertThat(query(session, join.formatted("RIGHT JOIN", "l.k = r.k"))).isFullyPushedDown()
-                    .matches(matches + ", (CAST(NULL AS BIGINT), BIGINT '12'), (CAST(NULL AS BIGINT), BIGINT '13')");
-            assertThat(query(session, join.formatted("FULL JOIN", "l.k = r.k"))).isFullyPushedDown()
-                    .matches(matches + ", (BIGINT '3', CAST(NULL AS BIGINT)), (BIGINT '4', CAST(NULL AS BIGINT)), " +
-                            "(CAST(NULL AS BIGINT), BIGINT '12'), (CAST(NULL AS BIGINT), BIGINT '13')");
-
-            assertThat(query(session, join.formatted("JOIN", "l.k = r.k AND l.second_key = r.second_key")))
-                    .isFullyPushedDown()
-                    .matches("VALUES (BIGINT '1', BIGINT '10'), (BIGINT '2', BIGINT '11')");
-            assertThat(query(session, "SELECT l.id, r.id FROM (SELECT id, k FROM " + left.getName() +
-                    " WHERE id > 1 AND id < 3) l JOIN (SELECT id, k FROM " + right.getName() +
-                    " WHERE id > 10 AND id < 12) r ON l.k = r.k"))
-                    .isFullyPushedDown()
-                    .matches("VALUES (BIGINT '2', BIGINT '11')");
-
-            assertThat(query(getSession(), join.formatted("JOIN", "l.k = r.k"))).joinIsNotFullyPushedDown();
-            assertThat(query(session, join.formatted("JOIN", "l.k < r.k")))
-                    .joinIsNotFullyPushedDown();
-            assertThat(query(session, join.formatted("JOIN", "l.s = r.s")))
-                    .matches("VALUES (BIGINT '1', BIGINT '10'), (BIGINT '2', BIGINT '11'), " +
-                            "(BIGINT '3', BIGINT '12'), (BIGINT '4', BIGINT '13')")
-                    .isFullyPushedDown();
-            assertThat(query(session, join.formatted("JOIN", "l.d = r.d")))
-                    .matches("VALUES (BIGINT '1', BIGINT '10'), (BIGINT '2', BIGINT '11'), " +
-                            "(BIGINT '3', BIGINT '12'), (BIGINT '4', BIGINT '13')")
-                    .isFullyPushedDown();
-            Session complex = Session.builder(session)
-                    .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "complex_join_pushdown_enabled", "true")
-                    .build();
-            assertThat(query(complex, join.formatted("JOIN", "l.k = r.k"))).joinIsNotFullyPushedDown();
-        }
-    }
-
-    @Override
-    protected void verifyConcurrentAddColumnFailurePermissible(Exception exception)
-    {
-        // YDB serializes overlapping scheme operations on one table and reports the conflict as retryable OVERLOADED:
-        // https://ydb.tech/docs/en/reference/ydb-sdk/ydb-status-codes
-        assertThat(exception)
-                .hasMessageContaining("Status{code = OVERLOADED(code=400060)")
-                .hasMessageContaining("error: path is under operation")
-                .hasMessageContaining("state: EPathStateAlter");
-    }
-
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         return switch (connectorBehavior) {
-            case SUPPORTS_CREATE_VIEW,
+            case SUPPORTS_CREATE_TABLE,
+                 SUPPORTS_INSERT,
+                 SUPPORTS_UPDATE,
+                 SUPPORTS_DELETE,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
+                 SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
+                 SUPPORTS_AGGREGATION_PUSHDOWN,
+                 SUPPORTS_TOPN_PUSHDOWN,
+                 SUPPORTS_LIMIT_PUSHDOWN,
+                 SUPPORTS_CREATE_VIEW,
                  SUPPORTS_CREATE_SCHEMA,
                  SUPPORTS_RENAME_SCHEMA,
                  SUPPORTS_SET_COLUMN_TYPE,
@@ -173,53 +101,8 @@ public class TestYdbConnectorTest
                  SUPPORTS_SET_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
-            case SUPPORTS_TOPN_PUSHDOWN_WITH_VARCHAR -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
-    }
-
-    @Test
-    @Override
-    public void testCharVarcharComparison()
-    {
-        // YDB has no fixed-width string primitive. Mapping CHAR to Text loses its width in JDBC metadata
-        // and violates Trino padding/coercion semantics: https://ydb.tech/docs/en/yql/reference/types/primitive
-        assertThatThrownBy(super::testCharVarcharComparison)
-                .hasMessage("Unsupported column type: char(3)");
-    }
-
-    @Test
-    @Override
-    public void testCharToVarcharCastCoercionAcrossPushdown()
-    {
-        // YDB has no fixed-width string type: https://ydb.tech/docs/en/yql/reference/types/primitive
-        assertThatThrownBy(super::testCharToVarcharCastCoercionAcrossPushdown)
-                .hasMessage("Unsupported column type: char(5)");
-    }
-
-    @Override
-    protected TestTable createTableWithDefaultColumns()
-    {
-        return new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
-                "test_insert_default_",
-                "(col_required Int64 NOT NULL, " +
-                        "col_nullable Int64, " +
-                        "col_default Int64 DEFAULT 43, " +
-                        "col_nonnull_default Int64 NOT NULL DEFAULT 42, " +
-                        "col_required2 Int64 NOT NULL, " +
-                        "PRIMARY KEY (col_required))");
-    }
-
-    @Override
-    protected String errorMessageForInsertIntoNotNullColumn(String columnName)
-    {
-        return "(?s).*("
-                + "NULL value not allowed for NOT NULL column: " + columnName
-                + "|Cannot set NULL to not nullable column: " + columnName
-                + "|Missing value for not null column: " + columnName
-                + "|Missing not null column in input: " + columnName
-                + ").*";
     }
 
     @Override
@@ -243,15 +126,6 @@ public class TestYdbConnectorTest
             return Optional.empty();
         }
         return Optional.of(dataMappingTestSetup);
-    }
-
-    @Test
-    public void testVarbinaryCreateTableAndInsert()
-    {
-        try (TestTable table = newTrinoTable("varbinary_insert_", "(id bigint, value varbinary)")) {
-            assertUpdate("INSERT INTO " + table.getName() + " VALUES (1, X'0080FF')", 1);
-            assertQuery("SELECT value FROM " + table.getName(), "VALUES X'0080FF'");
-        }
     }
 
     @Override
@@ -302,5 +176,54 @@ public class TestYdbConnectorTest
     protected void verifyColumnNameLengthFailurePermissible(Throwable e)
     {
         assertThat(e.getMessage()).contains("too long");
+    }
+
+    @Test
+    public void testNativeTypeReads()
+    {
+        JdbcSqlExecutor executor = new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb));
+        try (TestTable table = new TestTable(
+                executor,
+                "native_types_",
+                "(id Int64, u Uint64, s Utf8, b String, d Date32, t Timestamp64, n Decimal(22,9), PRIMARY KEY (id))",
+                List.of("1, 18446744073709551615ul, 'hello'u, String('\\x00\\x80\\xff'), Date32('1969-12-31'), " +
+                                "Timestamp64('1969-12-31T23:59:59.999999Z'), Decimal('1.25', 22, 9)",
+                        "2, NULL, NULL, NULL, NULL, NULL, NULL"))) {
+            assertQuery("SELECT id, u, s, b, d, t, n FROM " + table.getName(),
+                    "VALUES (BIGINT '1', DECIMAL '18446744073709551615', 'hello', X'0080FF', DATE '1969-12-31', " +
+                            "TIMESTAMP '1969-12-31 23:59:59.999999', CAST('1.25' AS DECIMAL(22,9))), " +
+                            "(BIGINT '2', NULL, NULL, NULL, NULL, NULL, NULL)");
+        }
+    }
+
+    @Test
+    public void testReadOnlyWritesRejected()
+    {
+        JdbcSqlExecutor executor = new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb));
+        try (TestTable table = new TestTable(
+                executor,
+                "read_only_",
+                "(id Int64, value Utf8, PRIMARY KEY (id))",
+                List.of("1, 'original'u"))) {
+            String copy = table.getName() + "_copy";
+            try {
+                for (String sql : List.of(
+                        "CREATE TABLE " + copy + " (id bigint)",
+                        "INSERT INTO " + table.getName() + " VALUES (2, 'new')",
+                        "UPDATE " + table.getName() + " SET value = 'changed' WHERE id = 1",
+                        "DELETE FROM " + table.getName() + " WHERE id = 1",
+                        "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
+                                "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
+                        "ALTER TABLE " + table.getName() + " ADD COLUMN added bigint",
+                        "ALTER TABLE " + table.getName() + " RENAME TO " + copy,
+                        "DROP TABLE " + table.getName())) {
+                    assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
+                }
+                assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (BIGINT '1', 'original')");
+            }
+            finally {
+                executor.execute("DROP TABLE IF EXISTS " + copy);
+            }
+        }
     }
 }

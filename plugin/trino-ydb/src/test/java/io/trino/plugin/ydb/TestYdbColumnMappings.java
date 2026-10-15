@@ -16,6 +16,7 @@ package io.trino.plugin.ydb;
 import io.trino.plugin.base.mapping.DefaultIdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ColumnMapping;
+import io.trino.plugin.jdbc.DefaultQueryBuilder;
 import io.trino.plugin.jdbc.JdbcMetadataConfig;
 import io.trino.plugin.jdbc.JdbcMetadataSessionProperties;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
@@ -69,7 +70,7 @@ public class TestYdbColumnMappings
             _ -> {
                 throw new SQLException("This test must not open a connection");
             },
-            new YdbQueryBuilder(RemoteQueryModifier.NONE),
+            new DefaultQueryBuilder(RemoteQueryModifier.NONE),
             new DefaultIdentifierMapping(),
             RemoteQueryModifier.NONE);
 

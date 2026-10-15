@@ -13,35 +13,13 @@
  */
 package io.trino.plugin.ydb;
 
-import com.google.common.collect.ImmutableList;
-import com.google.inject.Module;
-import io.trino.plugin.jdbc.JdbcMetadataConfig;
-import io.trino.plugin.jdbc.credential.CredentialProviderModule;
-import io.trino.spi.Plugin;
-import io.trino.spi.connector.ConnectorFactory;
+import io.trino.plugin.jdbc.JdbcPlugin;
 
-import static io.airlift.configuration.ConfigBinder.configBinder;
-import static io.airlift.configuration.ConfigurationAwareModule.combine;
-
-public record YdbPlugin(Module module)
-        implements Plugin
+public class YdbPlugin
+        extends JdbcPlugin
 {
-    private static final String NAME = "ydb";
-
     public YdbPlugin()
     {
-        this(new YdbClientModule());
-    }
-
-    @Override
-    public Iterable<ConnectorFactory> getConnectorFactories()
-    {
-        return ImmutableList.of(new YdbConnectorFactory(
-                NAME,
-                () -> combine(
-                        new CredentialProviderModule(),
-                        binder -> configBinder(binder).bindConfigDefaults(
-                                JdbcMetadataConfig.class, config -> config.setComplexJoinPushdownEnabled(false)),
-                        module)));
+        super("ydb", YdbClientModule::new);
     }
 }

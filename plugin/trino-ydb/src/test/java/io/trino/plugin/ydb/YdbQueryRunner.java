@@ -15,34 +15,38 @@ package io.trino.plugin.ydb;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.inject.Module;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.MaterializedResult;
+import io.trino.testing.MaterializedRow;
 import io.trino.tpch.TpchTable;
 import tech.ydb.test.junit5.YdbHelperExtension;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
+import static io.trino.plugin.ydb.YdbColumnMappings.YDB_DATE32_SQL_TYPE;
+import static io.trino.spi.type.DateType.DATE;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static java.util.Collections.nCopies;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.IntStream.range;
 
 public final class YdbQueryRunner
 {
     public static final String DEFAULT_SCHEMA = YdbClient.DEFAULT_SCHEMA;
-    public static final String YDB_HIDDEN_PK_COLUMN = TestingYdbJdbcClient.YDB_HIDDEN_PK_COLUMN;
 
     private YdbQueryRunner() {}
 
     public static Builder builder(YdbHelperExtension ydb)
     {
-        String jdbcUrl = buildJdbcUrl(ydb);
-        return new Builder()
-                // Transactional INSERT staging has dedicated coverage in TestYdbCreateTable.
-                .addConnectorProperty("insert.non-transactional-insert.enabled", "true")
-                .addConnectorProperty("merge.non-transactional-merge.enabled", "true")
-                .addConnectorProperty("connection-url", jdbcUrl);
+        return new Builder(buildJdbcUrl(ydb));
     }
 
     static String buildJdbcUrl(YdbHelperExtension ydb)
@@ -51,7 +55,7 @@ public final class YdbQueryRunner
         url.append(ydb.useTls() ? "grpcs://" : "grpc://");
         url.append(ydb.endpoint());
         url.append(ydb.database());
-        url.append("?useQueryService=true&sessionPoolMaxSize=10");
+        url.append("?useQueryService=true&sessionPoolMaxSize=10&useDiscovery=false");
         if (ydb.authToken() != null) {
             url.append("&token=").append(ydb.authToken());
         }
@@ -61,17 +65,18 @@ public final class YdbQueryRunner
     public static class Builder
             extends DistributedQueryRunner.Builder<Builder>
     {
+        private final String jdbcUrl;
         private final Map<String, String> connectorProperties = new HashMap<>();
         private List<TpchTable<?>> initialTables = ImmutableList.of();
-        private boolean useTestingClient = true;
-        private Module clientModule;
 
-        private Builder()
+        private Builder(String jdbcUrl)
         {
             super(testSessionBuilder()
                     .setCatalog("local")
                     .setSchema(DEFAULT_SCHEMA)
                     .build());
+            this.jdbcUrl = jdbcUrl;
+            connectorProperties.put("connection-url", jdbcUrl);
         }
 
         public Builder addConnectorProperty(String key, String value)
@@ -86,18 +91,6 @@ public final class YdbQueryRunner
             return this;
         }
 
-        public Builder useProductionClient()
-        {
-            this.useTestingClient = false;
-            return this;
-        }
-
-        public Builder setClientModule(Module clientModule)
-        {
-            this.clientModule = clientModule;
-            return this;
-        }
-
         @Override
         public DistributedQueryRunner build()
                 throws Exception
@@ -106,49 +99,75 @@ public final class YdbQueryRunner
             try {
                 queryRunner.installPlugin(new TpchPlugin());
                 queryRunner.createCatalog("tpch", "tpch");
-
-                queryRunner.installPlugin(new YdbPlugin(clientModule != null
-                        ? clientModule : useTestingClient ? new TestingYdbJdbcModule() : new YdbClientModule()));
+                queryRunner.installPlugin(new YdbPlugin());
                 queryRunner.createCatalog("local", "ydb", ImmutableMap.copyOf(connectorProperties));
 
-                for (TpchTable<?> table : initialTables) {
-                    dropTable(queryRunner, table);
+                try (Connection connection = DriverManager.getConnection(jdbcUrl)) {
+                    for (TpchTable<?> table : initialTables) {
+                        loadTable(queryRunner, connection, table);
+                    }
                 }
-
-                for (TpchTable<?> table : initialTables) {
-                    createTableWithPk(queryRunner, table);
-                }
-
                 return queryRunner;
             }
-            catch (Throwable e) {
+            catch (Throwable failure) {
                 queryRunner.close();
-                throw e;
+                throw failure;
             }
         }
 
-        private static void createTableWithPk(DistributedQueryRunner queryRunner, TpchTable<?> table)
+        private static void loadTable(DistributedQueryRunner queryRunner, Connection connection, TpchTable<?> table)
+                throws Exception
         {
             String tableName = table.getTableName();
+            MaterializedResult rows = queryRunner.execute("SELECT * FROM tpch.tiny." + tableName).toTestTypes();
+            List<String> columns = table.getColumns().stream()
+                    .map(column -> column.getColumnName().substring(2))
+                    .toList();
+            String declarations = range(0, columns.size())
+                    .mapToObj(index -> "`" + columns.get(index) + "` " + YdbTypeUtils.toTypeHandle(rows.getTypes().get(index))
+                            .orElseThrow().jdbcTypeName().orElseThrow())
+                    .collect(joining(", "));
+            String primaryKeys = switch (tableName) {
+                case "region" -> "regionkey";
+                case "nation" -> "nationkey";
+                case "supplier" -> "suppkey";
+                case "customer" -> "custkey";
+                case "part" -> "partkey";
+                case "partsupp" -> "partkey, suppkey";
+                case "orders" -> "orderkey";
+                case "lineitem" -> "orderkey, linenumber";
+                default -> throw new IllegalArgumentException("Unsupported TPCH fixture table: " + tableName);
+            };
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("DROP TABLE IF EXISTS `" + tableName + "`");
+                statement.execute("CREATE TABLE `" + tableName + "` (" + declarations + ", PRIMARY KEY (" + primaryKeys + "))");
+            }
 
-            String columnNames = table.getColumns().stream()
-                    .map(col -> col.getColumnName().substring(2))
-                    .collect(Collectors.joining(", "));
-
-            String createSql = String.format(
-                    "CREATE TABLE %s AS SELECT %s, row_number() OVER () AS %s FROM tpch.tiny.%s",
-                    tableName,
-                    columnNames,
-                    YDB_HIDDEN_PK_COLUMN,
-                    tableName);
-
-            queryRunner.execute(createSql);
-        }
-
-        private static void dropTable(DistributedQueryRunner queryRunner, TpchTable<?> table)
-        {
-            String tableName = table.getTableName();
-            queryRunner.execute("DROP TABLE IF EXISTS " + tableName);
+            String insert = "UPSERT INTO `" + tableName + "` (" + String.join(", ", columns) + ") VALUES (" +
+                    String.join(", ", nCopies(columns.size(), "?")) + ")";
+            try (PreparedStatement statement = connection.prepareStatement(insert)) {
+                int pendingRows = 0;
+                for (MaterializedRow row : rows.getMaterializedRows()) {
+                    for (int index = 0; index < columns.size(); index++) {
+                        Object value = row.getField(index);
+                        if (rows.getTypes().get(index).equals(DATE)) {
+                            statement.setObject(index + 1, ((LocalDate) value).toEpochDay(), YDB_DATE32_SQL_TYPE);
+                        }
+                        else {
+                            statement.setObject(index + 1, value);
+                        }
+                    }
+                    statement.addBatch();
+                    pendingRows++;
+                    if (pendingRows == 1000) {
+                        statement.executeBatch();
+                        pendingRows = 0;
+                    }
+                }
+                if (pendingRows > 0) {
+                    statement.executeBatch();
+                }
+            }
         }
     }
 }

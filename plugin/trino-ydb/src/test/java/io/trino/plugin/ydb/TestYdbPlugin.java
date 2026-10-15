@@ -14,10 +14,11 @@
 package io.trino.plugin.ydb;
 
 import io.trino.spi.connector.Connector;
+import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
@@ -26,21 +27,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestYdbPlugin
 {
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    public void testConnectorBootstrap(boolean testingClient)
+    @Test
+    public void testConnectorBootstrap()
     {
-        YdbPlugin plugin = new YdbPlugin(testingClient ? new TestingYdbJdbcModule() : new YdbClientModule());
-        Connector connector = getOnlyElement(plugin.getConnectorFactories())
-                .create("ydb_bootstrap",
-                        Map.of("connection-url", "jdbc:ydb:grpc://127.0.0.1:2136/local"),
-                        new TestingConnectorContext());
-        try {
-            assertThat(connector.getPageSinkProvider()).isInstanceOf(YdbPageSinkProvider.class);
-            assertThat(connector.getCapabilities()).contains(NOT_NULL_COLUMN_CONSTRAINT);
-        }
-        finally {
-            connector.shutdown();
+        ConnectorFactory factory = getOnlyElement(new YdbPlugin().getConnectorFactories());
+        for (String catalogName : List.of("ydb_first", "ydb_second")) {
+            Connector connector = factory.create(
+                    catalogName,
+                    Map.of("connection-url", "jdbc:ydb:grpc://127.0.0.1:2136/local"),
+                    new TestingConnectorContext());
+            try {
+                assertThat(connector.getPageSourceProvider()).isNotNull();
+                assertThat(connector.getCapabilities()).contains(NOT_NULL_COLUMN_CONSTRAINT);
+            }
+            finally {
+                connector.shutdown();
+            }
         }
     }
 }

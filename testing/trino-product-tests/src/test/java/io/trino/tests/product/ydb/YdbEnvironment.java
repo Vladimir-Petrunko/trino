@@ -19,11 +19,13 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.trino.TrinoContainer;
+import tech.ydb.jdbc.YdbDriver;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Properties;
 
 /**
  * YDB product test environment.
@@ -65,6 +67,13 @@ public class YdbEnvironment
                         "connection-url", "jdbc:ydb:grpc://ydb:2136/local?useQueryService=true"))
                 .build();
         TrinoProductTestContainer.startAndWait(trino);
+    }
+
+    public Connection createYdbConnection()
+            throws SQLException
+    {
+        return new YdbDriver().connect("jdbc:ydb:grpc://" + ydb.getHost() + ":" + ydb.getMappedPort(2136) +
+                "/local?useQueryService=true&useDiscovery=false", new Properties());
     }
 
     @Override
