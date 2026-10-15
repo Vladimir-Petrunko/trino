@@ -58,10 +58,50 @@ Unsupported source types are omitted by default. The JDBC
 `unsupported-type-handling=CONVERT_TO_VARCHAR` option exposes them as
 read-only strings without predicate pushdown.
 
+## Creating and writing tables
+
+YDB requires an explicit primary key. Supply its columns in order using the
+table property `primary_key`. The key may be composite, and key columns do not
+have to be the first columns in the table:
+
+```sql
+CREATE TABLE example.default.events (
+    payload varchar,
+    tenant bigint,
+    event_id bigint
+)
+WITH (primary_key = ARRAY['event_id', 'tenant']);
+
+INSERT INTO example.default.events VALUES ('created', 1, 10);
+SELECT * FROM example.default.events;
+DROP TABLE example.default.events;
+```
+
+`CREATE TABLE AS SELECT` also requires the primary-key property and can name
+its output columns explicitly:
+
+```sql
+CREATE TABLE example.default.event_ids (event_id)
+WITH (primary_key = ARRAY['event_id'])
+AS SELECT BIGINT '10';
+```
+
+Writes use signed integer, boolean, floating-point, varchar, varbinary, decimal,
+`date`, and `timestamp(3)` / `timestamp(6)` mappings. New dates and timestamps
+use YDB `Date32` and `Timestamp64`. Decimal precision must not exceed 35.
+
+By default, INSERT writes batches to a temporary table and publishes them with
+one native INSERT SELECT statement. A duplicate key makes that statement fail
+without publishing the staged rows. CTAS publishes its temporary table only
+after the write succeeds. Query and task retries are not supported.
+
+The JDBC `non_transactional_insert` session property bypasses staging when
+explicitly enabled. In that mode, completed batches can remain after a failure.
+
 ## Limitations
 
-The connector is read-only. Creating, changing, or dropping tables and
-schemas, `INSERT`, `UPDATE`, `DELETE`, and `MERGE` are not supported.
+Schema and column changes, table renaming, `TRUNCATE`, `UPDATE`, `DELETE`, and
+`MERGE` are not supported.
 
 Joins, aggregations, scalar expressions, sorting, and limits are evaluated
 by Trino. Predicates use the JDBC connector's type-specific pushdown

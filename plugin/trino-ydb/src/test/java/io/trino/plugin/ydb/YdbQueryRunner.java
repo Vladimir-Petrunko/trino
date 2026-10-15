@@ -15,6 +15,8 @@ package io.trino.plugin.ydb;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.inject.Module;
+import io.trino.plugin.jdbc.JdbcPlugin;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
@@ -30,6 +32,7 @@ import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static io.trino.plugin.ydb.YdbColumnMappings.YDB_DATE32_SQL_TYPE;
 import static io.trino.spi.type.DateType.DATE;
@@ -68,6 +71,7 @@ public final class YdbQueryRunner
         private final String jdbcUrl;
         private final Map<String, String> connectorProperties = new HashMap<>();
         private List<TpchTable<?>> initialTables = ImmutableList.of();
+        private Optional<Module> clientModule = Optional.empty();
 
         private Builder(String jdbcUrl)
         {
@@ -91,6 +95,12 @@ public final class YdbQueryRunner
             return this;
         }
 
+        public Builder setClientModule(Module clientModule)
+        {
+            this.clientModule = Optional.of(clientModule);
+            return this;
+        }
+
         @Override
         public DistributedQueryRunner build()
                 throws Exception
@@ -99,7 +109,12 @@ public final class YdbQueryRunner
             try {
                 queryRunner.installPlugin(new TpchPlugin());
                 queryRunner.createCatalog("tpch", "tpch");
-                queryRunner.installPlugin(new YdbPlugin());
+                if (clientModule.isPresent()) {
+                    queryRunner.installPlugin(new JdbcPlugin("ydb", () -> clientModule.orElseThrow()));
+                }
+                else {
+                    queryRunner.installPlugin(new YdbPlugin());
+                }
                 queryRunner.createCatalog("local", "ydb", ImmutableMap.copyOf(connectorProperties));
 
                 try (Connection connection = DriverManager.getConnection(jdbcUrl)) {
