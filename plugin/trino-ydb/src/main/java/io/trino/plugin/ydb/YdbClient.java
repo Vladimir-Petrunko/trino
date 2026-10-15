@@ -311,6 +311,9 @@ public class YdbClient
                 .anyMatch(column -> column.getColumnName().equals(MERGE_ROW_ID))) {
             return Optional.empty();
         }
+        if (expression.getType() instanceof VarcharType varcharType && !varcharType.isUnbounded()) {
+            return Optional.empty();
+        }
         if (!supportsExpression(expression, assignments)) {
             return Optional.empty();
         }
