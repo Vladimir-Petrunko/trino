@@ -191,9 +191,9 @@ public class TestYdbConnectorTest
                     "Timestamp64('1969-12-31T23:59:59.999999Z'), Decimal('1.25', 22, 9)), " +
                     "(2, NULL, NULL, NULL, NULL, NULL, NULL)");
             assertQuery("SELECT id, u, s, b, d, t, n FROM " + table.getName(),
-                    "VALUES (BIGINT '1', DECIMAL '18446744073709551615', 'hello', X'0080FF', DATE '1969-12-31', " +
+                    "VALUES (CAST(1 AS BIGINT), CAST('18446744073709551615' AS DECIMAL(20,0)), 'hello', X'0080FF', DATE '1969-12-31', " +
                             "TIMESTAMP '1969-12-31 23:59:59.999999', CAST('1.25' AS DECIMAL(22,9))), " +
-                            "(BIGINT '2', NULL, NULL, NULL, NULL, NULL, NULL)");
+                            "(CAST(2 AS BIGINT), NULL, NULL, NULL, NULL, NULL, NULL)");
         }
     }
 
@@ -220,7 +220,7 @@ public class TestYdbConnectorTest
                         "DROP TABLE " + table.getName())) {
                     assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
                 }
-                assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (BIGINT '1', 'original')");
+                assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), 'original')");
             }
             finally {
                 executor.execute("DROP TABLE IF EXISTS " + copy);
