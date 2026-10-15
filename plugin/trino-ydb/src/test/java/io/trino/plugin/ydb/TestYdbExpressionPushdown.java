@@ -69,9 +69,9 @@ public class TestYdbExpressionPushdown
             executor.execute("UPSERT INTO " + table.getName() + " (id, n, other, s) VALUES " +
                     "(1, 11, 11, '\u00DF\u0130\u03A3'u), (2, -11, 2, '\u039F\u0394\u039F\u03A3'u)");
             String caseSql = "SELECT lower(s), upper(s) FROM " + table.getName();
-            assertThat(query(caseSql)).isFullyPushedDown();
-            assertThat(computeActual(caseSql).getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(computeActual(disabledSession, caseSql).getMaterializedRows());
+            assertThat(query(caseSql))
+                    .matches(disabledSession, caseSql)
+                    .isFullyPushedDown();
         }
     }
 
