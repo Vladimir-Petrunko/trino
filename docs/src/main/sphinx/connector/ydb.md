@@ -101,10 +101,18 @@ Every INSERT in that mode must explicitly supply all primary-key columns,
 including nullable key columns. Default staged INSERT supplies NULL for an
 omitted nullable primary-key column.
 
+### Table and column changes
+
+The connector supports renaming a table within `default`, adding nullable
+columns at the end of a table, dropping non-key columns, and dropping `NOT NULL`
+from non-key columns. Primary-key columns cannot be dropped or made nullable.
+Adding a column with `NOT NULL`, a default, a comment, or an explicit position
+is not supported.
+
 ## Limitations
 
-Schema and column changes, table renaming, `TRUNCATE`, `UPDATE`, `DELETE`, and
-`MERGE` are not supported.
+Schema changes, renaming columns, changing column types, `TRUNCATE`, `UPDATE`,
+`DELETE`, and `MERGE` are not supported.
 
 Joins, aggregations, scalar expressions, sorting, and limits are evaluated
 by Trino. Predicates use the JDBC connector's type-specific pushdown

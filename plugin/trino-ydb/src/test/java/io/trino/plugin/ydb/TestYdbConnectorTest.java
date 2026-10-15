@@ -34,7 +34,10 @@ import java.util.OptionalInt;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.testing.TestingNames.randomNameSuffix;
+import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @ResourceLock("YDB_HELPER")
 public class TestYdbConnectorTest
@@ -72,9 +75,6 @@ public class TestYdbConnectorTest
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
-                 SUPPORTS_ADD_COLUMN,
-                 SUPPORTS_RENAME_TABLE,
-                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
                  SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_TOPN_PUSHDOWN,
@@ -102,8 +102,165 @@ public class TestYdbConnectorTest
                  SUPPORTS_SET_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
+            case SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_DROP_COLUMN,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
+    }
+
+    @Override
+    protected String tableDefinitionForAddColumn()
+    {
+        return "(x varchar) WITH (primary_key = ARRAY['x'])";
+    }
+
+    @Override
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception exception)
+    {
+        // Overlapping YDB scheme operations on one table may report OVERLOADED.
+        // https://ydb.tech/docs/en/reference/ydb-sdk/ydb-status-codes
+        assertThat(exception)
+                .hasMessageContaining("Status{code = OVERLOADED(code=400060)")
+                .hasMessageContaining("error: path is under operation")
+                .hasMessageContaining("state: EPathStateAlter");
+    }
+
+    // Generic DDL fixtures omit YDB's mandatory primary key.
+    // https://ydb.tech/docs/en/yql/reference/syntax/create_table/
+    @Test
+    @Override
+    public void testAddNotNullColumnToEmptyTable()
+    {
+        try (TestTable table = newTrinoTable("test_add_nn_to_empty", "(a_varchar varchar) WITH (primary_key = ARRAY['a_varchar'])")) {
+            assertThat(query("ALTER TABLE " + table.getName() + " ADD COLUMN b_varchar varchar NOT NULL"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertTableColumnNames(table.getName(), "a_varchar");
+            assertThat(query("SELECT * FROM " + table.getName())).returnsEmptyResult();
+        }
+    }
+
+    @Test
+    @Override
+    public void testAddColumnWithPosition()
+    {
+        try (TestTable table = newTrinoTable("test_add_column_", "WITH (primary_key = ARRAY['second']) AS SELECT 2 second, 4 fourth")) {
+            assertQueryFails(
+                    "ALTER TABLE " + table.getName() + " ADD COLUMN first integer FIRST",
+                    "This connector does not support adding columns with FIRST clause");
+            assertQueryFails(
+                    "ALTER TABLE " + table.getName() + " ADD COLUMN third integer AFTER second",
+                    "This connector does not support adding columns with AFTER clause");
+            assertTableColumnNames(table.getName(), "second", "fourth");
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (2, 4)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testDropColumn()
+    {
+        String tableName;
+        try (TestTable table = newTrinoTable("test_drop_column_", "WITH (primary_key = ARRAY['a']) AS SELECT 123 x, 456 y, 111 a")) {
+            tableName = table.getName();
+            assertThat(query("ALTER TABLE " + tableName + " DROP COLUMN a"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertUpdate("ALTER TABLE " + tableName + " DROP COLUMN x");
+            assertUpdate("ALTER TABLE " + tableName + " DROP COLUMN IF EXISTS y");
+            assertUpdate("ALTER TABLE " + tableName + " DROP COLUMN IF EXISTS notExistColumn");
+            assertQueryFails("SELECT x FROM " + tableName, ".* Column 'x' cannot be resolved");
+            assertQueryFails("SELECT y FROM " + tableName, ".* Column 'y' cannot be resolved");
+            assertQuery("SELECT a FROM " + tableName, "VALUES 111");
+            assertQueryFails("ALTER TABLE " + tableName + " DROP COLUMN a", ".* Cannot drop the only column in a table");
+        }
+
+        assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+        assertUpdate("ALTER TABLE IF EXISTS " + tableName + " DROP COLUMN notExistColumn");
+        assertUpdate("ALTER TABLE IF EXISTS " + tableName + " DROP COLUMN IF EXISTS notExistColumn");
+        assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+    }
+
+    @Test
+    @Override
+    public void testDropNotNullConstraint()
+    {
+        try (TestTable table = newTrinoTable("test_drop_not_null_", "(id bigint NOT NULL, col integer NOT NULL) WITH (primary_key = ARRAY['id'])")) {
+            assertThat(columnIsNullable(table.getName(), "col")).isFalse();
+            assertThat(query("ALTER TABLE " + table.getName() + " ALTER COLUMN id DROP NOT NULL"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertThat(columnIsNullable(table.getName(), "id")).isFalse();
+
+            assertUpdate("ALTER TABLE " + table.getName() + " ALTER COLUMN col DROP NOT NULL");
+            assertThat(columnIsNullable(table.getName(), "col")).isTrue();
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES (1, NULL)", 1);
+            assertQuery("SELECT id, col FROM " + table.getName(), "VALUES (BIGINT '1', NULL)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testRenameTable()
+    {
+        String tableName = "test_rename_" + randomNameSuffix();
+        String renamedTable = "test_rename_new_" + randomNameSuffix();
+        String testExistsTableName = "test_rename_exists_" + randomNameSuffix();
+        String uppercaseName = "TEST_RENAME_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x", 1);
+        try {
+            assertUpdate("ALTER TABLE " + tableName + " RENAME TO " + renamedTable);
+            assertQuery("SELECT x FROM " + renamedTable, "VALUES 123");
+            assertUpdate("ALTER TABLE IF EXISTS " + renamedTable + " RENAME TO " + testExistsTableName);
+            assertQuery("SELECT x FROM " + testExistsTableName, "VALUES 123");
+            assertUpdate("ALTER TABLE " + testExistsTableName + " RENAME TO " + uppercaseName);
+            assertQuery("SELECT x FROM " + uppercaseName.toLowerCase(ENGLISH), "VALUES 123");
+            assertUpdate("DROP TABLE " + uppercaseName);
+
+            assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+            assertThat(getQueryRunner().tableExists(getSession(), renamedTable)).isFalse();
+            assertUpdate("ALTER TABLE IF EXISTS " + tableName + " RENAME TO " + renamedTable);
+            assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+            assertThat(getQueryRunner().tableExists(getSession(), renamedTable)).isFalse();
+        }
+        finally {
+            for (String name : List.of(tableName, renamedTable, testExistsTableName, uppercaseName)) {
+                assertUpdate("DROP TABLE IF EXISTS " + name);
+            }
+        }
+    }
+
+    @Test
+    @Override
+    public void testRenameTableToLongTableName()
+    {
+        int maxLength = maxTableRenameLength().orElseThrow();
+        String baseTableName = "test_rename_target_" + randomNameSuffix();
+        String validTargetTableName = baseTableName + "z".repeat(maxLength - baseTableName.length());
+        String invalidTargetTableName = validTargetTableName + "z";
+
+        String sourceTableName1 = "test_rename_source_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + sourceTableName1 + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x", 1);
+        try {
+            assertUpdate("ALTER TABLE " + sourceTableName1 + " RENAME TO " + validTargetTableName);
+            assertThat(getQueryRunner().tableExists(getSession(), validTargetTableName)).isTrue();
+            assertQuery("SELECT x FROM " + validTargetTableName, "VALUES 123");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + validTargetTableName);
+            assertUpdate("DROP TABLE IF EXISTS " + sourceTableName1);
+        }
+
+        String sourceTableName2 = "test_rename_source_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + sourceTableName2 + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x", 1);
+        try {
+            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + sourceTableName2 + " RENAME TO " + invalidTargetTableName))
+                    .satisfies(this::verifyTableNameLengthFailurePermissible);
+            assertThat(getQueryRunner().tableExists(getSession(), invalidTargetTableName)).isFalse();
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + invalidTargetTableName);
+            assertUpdate("DROP TABLE IF EXISTS " + sourceTableName2);
+        }
     }
 
     @Override
@@ -207,23 +364,15 @@ public class TestYdbConnectorTest
                 "read_only_",
                 "(id Int64, value Utf8, PRIMARY KEY (id))")) {
             executor.execute("INSERT INTO " + table.getName() + " (id, value) VALUES (1, 'original'u)");
-            String copy = table.getName() + "_copy";
-            try {
-                for (String sql : List.of(
-                        "UPDATE " + table.getName() + " SET value = 'changed' WHERE id = 1",
-                        "DELETE FROM " + table.getName() + " WHERE id = 1",
-                        "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
-                                "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
-                        "ALTER TABLE " + table.getName() + " ADD COLUMN added bigint",
-                        "ALTER TABLE " + table.getName() + " RENAME TO " + copy,
-                        "ALTER TABLE " + table.getName() + " DROP COLUMN value")) {
-                    assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
-                }
-                assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), 'original')");
+            for (String sql : List.of(
+                    "UPDATE " + table.getName() + " SET value = 'changed' WHERE id = 1",
+                    "DELETE FROM " + table.getName() + " WHERE id = 1",
+                    "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
+                            "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
+                    "ALTER TABLE " + table.getName() + " RENAME COLUMN value TO renamed_value")) {
+                assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
             }
-            finally {
-                executor.execute("DROP TABLE IF EXISTS " + copy);
-            }
+            assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), 'original')");
         }
     }
 

@@ -36,7 +36,6 @@ import io.trino.plugin.jdbc.WriteMapping;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnMetadata;
-import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
@@ -334,19 +333,30 @@ public class YdbClient
     @Override
     public void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming tables");
+        if (!handle.getRequiredNamedRelation().getSchemaTableName().getSchemaName().equals(newTableName.getSchemaName())) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming tables across schemas");
+        }
+        super.renameTable(session, handle, newTableName);
     }
 
     @Override
-    public void addColumn(ConnectorSession session, JdbcTableHandle handle, ColumnMetadata column, ColumnPosition position)
+    protected void addColumn(ConnectorSession session, Connection connection, RemoteTableName table, ColumnMetadata column)
+            throws SQLException
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding columns");
+        if (!column.isNullable()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support adding not null columns");
+        }
+        super.addColumn(session, connection, table, column);
     }
 
     @Override
     public void dropColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support dropping columns");
+        if (getPrimaryKeys(session, handle.getRequiredNamedRelation().getRemoteTableName()).stream()
+                .anyMatch(key -> key.getColumnName().equals(column.getColumnName()))) {
+            throw new TrinoException(NOT_SUPPORTED, "YDB does not support dropping primary-key columns");
+        }
+        super.dropColumn(session, handle, column);
     }
 
     @Override
@@ -364,7 +374,11 @@ public class YdbClient
     @Override
     public void dropNotNullConstraint(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support dropping not null constraints");
+        if (getPrimaryKeys(session, handle.getRequiredNamedRelation().getRemoteTableName()).stream()
+                .anyMatch(key -> key.getColumnName().equals(column.getColumnName()))) {
+            throw new TrinoException(NOT_SUPPORTED, "YDB does not support dropping NOT NULL on primary-key columns");
+        }
+        super.dropNotNullConstraint(session, handle, column);
     }
 
     @Override

@@ -24,6 +24,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 import tech.ydb.test.junit5.YdbHelperExtension;
 
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @ResourceLock("YDB_HELPER")
@@ -50,9 +51,6 @@ public class TestYdbConnectorSmokeTest
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
-                 SUPPORTS_ADD_COLUMN,
-                 SUPPORTS_RENAME_TABLE,
-                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
                  SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_TOPN_PUSHDOWN,
@@ -80,8 +78,43 @@ public class TestYdbConnectorSmokeTest
                  SUPPORTS_SET_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
+            case SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_DROP_COLUMN,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
+    }
+
+    @Override
+    protected String getCreateTableDefaultDefinition()
+    {
+        return "(a bigint, b double) WITH (primary_key = ARRAY['a'])";
+    }
+
+    // The base test requires property-free CREATE, but YDB requires an explicit primary key.
+    // https://ydb.tech/docs/en/yql/reference/syntax/create_table/
+    @Test
+    @Override
+    public void testRenameTable()
+    {
+        String oldTable = "test_rename_old_" + randomNameSuffix();
+        String newTable = "test_rename_new_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + oldTable + " " + getCreateTableDefaultDefinition());
+        try {
+            assertUpdate("ALTER TABLE " + oldTable + " RENAME TO " + newTable);
+            assertThat(query("SHOW TABLES LIKE '" + oldTable + "'")).returnsEmptyResult();
+            assertThat(query("SELECT a, b FROM " + newTable)).returnsEmptyResult();
+            assertUpdate("INSERT INTO " + newTable + " (a, b) VALUES (42, -38.5)", 1);
+            assertThat(query("SELECT CAST(a AS bigint), b FROM " + newTable))
+                    .matches("VALUES (BIGINT '42', -385e-1)");
+            assertUpdate("DROP TABLE " + newTable);
+            assertThat(query("SHOW TABLES LIKE '" + newTable + "'")).returnsEmptyResult();
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + newTable);
+            assertUpdate("DROP TABLE IF EXISTS " + oldTable);
+        }
     }
 
     @Test
@@ -124,7 +157,7 @@ public class TestYdbConnectorSmokeTest
     @Override
     public void testInsert()
     {
-        try (TestTable table = newTrinoTable("test_insert_", "(a bigint, b double) WITH (primary_key = ARRAY['a'])")) {
+        try (TestTable table = newTrinoTable("test_insert_", getCreateTableDefaultDefinition())) {
             assertUpdate("INSERT INTO " + table.getName() + " (a, b) VALUES (42, -38.5), (13, 99.9)", 2);
             assertThat(query("SELECT CAST(a AS bigint), b FROM " + table.getName()))
                     .matches(expectedValues("(42, -38.5), (13, 99.9)"));
