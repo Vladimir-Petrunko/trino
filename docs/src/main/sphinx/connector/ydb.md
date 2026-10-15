@@ -130,9 +130,16 @@ in Trino where native value or comparison semantics differ. Disabling the JDBC
 `complex_expression_pushdown` session property retains expression evaluation in
 Trino.
 
-Joins, aggregations, sorting, and limits are evaluated by Trino. Domain
-predicates continue to use the JDBC connector's type-specific pushdown
-controllers.
+The connector supports aggregation pushdown for `count`, including
+`count(DISTINCT ...)`, and `min` and `max` on supported value mappings.
+It also pushes down floating-point `sum` and `avg`. Integral and decimal
+`sum` and `avg`, floating-point grouping, extrema, and distinct aggregates,
+and native decimal aggregation stay in Trino to preserve value and error
+semantics. Disabling the `aggregation_pushdown_enabled` catalog session
+property retains aggregation in Trino.
+
+Joins, sorting, and limits are evaluated by Trino. Domain predicates continue
+to use the JDBC connector's type-specific pushdown controllers.
 
 The connector defaults the JDBC driver option `cacheConnectionsInDriver` to
 `false` because JDBC 2.4.1 can race cached context lookup against last-close
