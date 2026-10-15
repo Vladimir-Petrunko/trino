@@ -32,8 +32,7 @@ import java.sql.SQLException;
 import java.util.List;
 
 import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
+import static io.trino.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @ResourceLock("YDB_HELPER")
@@ -59,8 +58,15 @@ public class TestYdbAggregationPushdown
                     .matches("VALUES (BIGINT '4', BIGINT '3', BIGINT '2', BIGINT '1', BIGINT '2', BIGINT '2', CAST('A' AS varchar), CAST('a' AS varchar), CAST(1 AS decimal(20, 0)), DECIMAL '18446744073709551615')")
                     .isFullyPushedDown();
             assertThat(query(disabledSession(), sql))
-                    .matches(getSession(), sql)
-                    .matches(anyTree(node(AggregationNode.class, anyTree(node(TableScanNode.class)))));
+                    .matches(getSession(), sql);
+            assertQuery(
+                    disabledSession(),
+                    sql,
+                    "VALUES (4, 3, 2, 1, 2, 2, 'A', 'a', CAST(1 AS decimal(20, 0)), CAST(18446744073709551615 AS decimal(20, 0)))",
+                    plan -> {
+                        assertThat(searchFrom(plan.getRoot()).where(AggregationNode.class::isInstance).findFirst()).isPresent();
+                        assertThat(searchFrom(plan.getRoot()).where(TableScanNode.class::isInstance).findFirst()).isPresent();
+                    });
             assertThat(query("SELECT s, count(*) FROM " + table.getName() + " GROUP BY s"))
                     .matches("VALUES (CAST('A' AS varchar), BIGINT '2'), (CAST('a' AS varchar), BIGINT '1'), (CAST(NULL AS varchar), BIGINT '1')")
                     .isFullyPushedDown();
