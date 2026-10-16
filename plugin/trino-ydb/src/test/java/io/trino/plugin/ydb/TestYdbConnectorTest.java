@@ -13,13 +13,27 @@
  */
 package io.trino.plugin.ydb;
 
+import com.google.common.collect.ImmutableList;
+import io.trino.Session;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+import io.trino.sql.parser.SqlParser;
+import io.trino.sql.tree.Array;
+import io.trino.sql.tree.ColumnDefinition;
+import io.trino.sql.tree.CreateTable;
+import io.trino.sql.tree.CreateTableAsSelect;
+import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.GenericDataType;
+import io.trino.sql.tree.Identifier;
+import io.trino.sql.tree.Property;
+import io.trino.sql.tree.Statement;
+import io.trino.sql.tree.StringLiteral;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.JdbcSqlExecutor;
+import io.trino.testing.sql.SqlExecutor;
 import io.trino.testing.sql.TestTable;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -27,13 +41,17 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import tech.ydb.test.junit5.YdbHelperExtension;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
+import static io.trino.plugin.ydb.YdbTableProperties.PRIMARY_KEY_PROPERTY;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.sql.SqlFormatter.formatSql;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,7 +70,232 @@ public class TestYdbConnectorTest
     {
         return YdbQueryRunner.builder(ydb)
                 .setInitialTables(REQUIRED_TPCH_TABLES)
+                .amendSession(session -> session.setCatalogSessionProperty("local", "non_transactional_merge", "true"))
                 .build();
+    }
+
+    @Override
+    protected TestTable createTestTableForWrites(String namePrefix, String tableDefinition, String primaryKey)
+    {
+        return createTestTableForWrites(namePrefix, tableDefinition, List.of(), primaryKey);
+    }
+
+    @Override
+    protected TestTable createTestTableForWrites(String namePrefix, String tableDefinition, List<String> rowsToInsert, String primaryKey)
+    {
+        SqlExecutor executor = sql -> {
+            Statement statement = new SqlParser().createStatement(sql);
+            getQueryRunner().execute(statement instanceof CreateTable || statement instanceof CreateTableAsSelect
+                    ? withPrimaryKey(statement, Optional.of(primaryKey))
+                    : sql);
+        };
+        return new TestTable(executor, namePrefix, tableDefinition, rowsToInsert);
+    }
+
+    @Override
+    protected void createTableForWrites(String createTable, String tableName, Optional<String> primaryKey, OptionalInt updateCount)
+    {
+        String sql = withPrimaryKey(new SqlParser().createStatement(createTable.formatted(tableName)), primaryKey);
+        updateCount.ifPresentOrElse(count -> assertUpdate(sql, count), () -> assertUpdate(sql));
+    }
+
+    private static String withPrimaryKey(Statement statement, Optional<String> primaryKey)
+    {
+        // Source fixtures nominate no key. Their non-floating columns are unique together;
+        // declare that real composite key without adding or hiding any fixture columns.
+        List<String> keys = primaryKey
+                .map(key -> Arrays.stream(key.split(",")).map(String::trim).toList())
+                .orElseGet(() -> ((CreateTable) statement).getElements().stream()
+                        .map(ColumnDefinition.class::cast)
+                        .filter(column -> !(column.getType() instanceof GenericDataType type) ||
+                                !Set.of("DOUBLE", "REAL").contains(type.getName().getValue().toUpperCase(ENGLISH)))
+                        .map(column -> column.getName().getSuffix())
+                        .toList());
+        Property property = new Property(
+                new Identifier(PRIMARY_KEY_PROPERTY),
+                new Array(keys.stream().map(key -> (Expression) new StringLiteral(key)).toList()));
+        Statement keyed = switch (statement) {
+            case CreateTable table -> new CreateTable(
+                    table.getLocation().orElseThrow(),
+                    table.getName(),
+                    table.getElements(),
+                    table.getSaveMode(),
+                    ImmutableList.<Property>builder().addAll(table.getProperties()).add(property).build(),
+                    table.getComment());
+            case CreateTableAsSelect table -> new CreateTableAsSelect(
+                    table.getLocation().orElseThrow(),
+                    table.getName(),
+                    table.getQuery(),
+                    table.getSaveMode(),
+                    ImmutableList.<Property>builder().addAll(table.getProperties()).add(property).build(),
+                    table.isWithData(),
+                    table.getColumnAliases(),
+                    table.getComment());
+            default -> throw new IllegalArgumentException("Expected CREATE TABLE fixture: " + statement.getClass().getSimpleName());
+        };
+        return formatSql(keyed);
+    }
+
+    @Test
+    @Override
+    public void testUpdate()
+    {
+        try (TestTable table = createTestTableForWrites("test_row_update_", "AS SELECT * FROM nation", "name")) {
+            assertUpdate("UPDATE " + table.getName() + " SET nationkey = 100 WHERE regionkey = 2", 5);
+            assertQuery("SELECT count(*) FROM " + table.getName() + " WHERE nationkey = 100", "VALUES 5");
+        }
+    }
+
+    @Test
+    @Override
+    public void testUpdateMultipleCondition()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "test_row_update_", "(id INTEGER, a INTEGER, b INTEGER)", List.of("1, 1, 10", "2, 1, 20", "3, 2, 10"), "id")) {
+            assertUpdate("UPDATE " + table.getName() + " SET b = 100 WHERE a = 1 AND b = 10", 1);
+            assertQuery("SELECT id, a, b FROM " + table.getName(), "VALUES (1, 1, 100), (2, 1, 20), (3, 2, 10)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testUpdateWithNullValues()
+    {
+        try (TestTable table = createTestTableForWrites("test_update_nulls_", "AS SELECT * FROM nation", "name")) {
+            assertQuery("SELECT count(*) FROM " + table.getName() + " WHERE nationkey IS NULL", "VALUES 0");
+            assertUpdate("UPDATE " + table.getName() + " SET nationkey = NULL WHERE regionkey = 2", 5);
+            assertQuery("SELECT count(*) FROM " + table.getName() + " WHERE nationkey IS NULL", "VALUES 5");
+        }
+        try (TestTable table = createTestTableForWrites(
+                "test_update_nulls_", "(nullable_col INTEGER, not_null_col INTEGER NOT NULL, pk INT)", "pk")) {
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES (1, 1, 1), (2, 2, 2)", 2);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 1, 1), (2, 2, 2)");
+            assertUpdate("UPDATE " + table.getName() + " SET nullable_col = NULL WHERE not_null_col = 1", 1);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (NULL, 1, 1), (2, 2, 2)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testRowLevelUpdate()
+    {
+        try (TestTable table = createTestTableForWrites("test_update_", "AS TABLE tpch.tiny.nation", "name")) {
+            assertUpdate("UPDATE " + table.getName() + " SET nationkey = 100 + nationkey WHERE regionkey = 2", 5);
+            assertThat(query("SELECT CAST(nationkey AS bigint), name, CAST(regionkey AS bigint), comment FROM " + table.getName()))
+                    .skippingTypesCheck()
+                    .matches("SELECT IF(regionkey=2, nationkey + 100, nationkey) nationkey, name, regionkey, comment FROM tpch.tiny.nation");
+            assertUpdate("UPDATE " + table.getName() + " SET nationkey = nationkey * 2 WHERE regionkey IN (2,3)", 10);
+            assertThat(query("SELECT CAST(nationkey AS bigint), name, CAST(regionkey AS bigint), comment FROM " + table.getName()))
+                    .skippingTypesCheck()
+                    .matches("SELECT CASE regionkey WHEN 2 THEN 2*(nationkey+100) WHEN 3 THEN 2*nationkey ELSE nationkey END nationkey, name, regionkey, comment FROM tpch.tiny.nation");
+        }
+    }
+
+    @Test
+    @Override
+    public void testUpdateWithPredicates()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "test_update_predicates_", "(id INT, a INT, b INT, c INT)", List.of("1, 1, 2, 3", "2, 11, 12, 13", "3, 21, 22, 23"), "id")) {
+            assertUpdate("UPDATE " + table.getName() + " SET a = a - 1 WHERE c = 3", 1);
+            assertQuery("SELECT id, a, b, c FROM " + table.getName(), "VALUES (1, 0, 2, 3), (2, 11, 12, 13), (3, 21, 22, 23)");
+            assertUpdate("UPDATE " + table.getName() + " SET c = c + 1 WHERE a = 11", 1);
+            assertQuery("SELECT id, a, b, c FROM " + table.getName(), "VALUES (1, 0, 2, 3), (2, 11, 12, 14), (3, 21, 22, 23)");
+            assertUpdate("UPDATE " + table.getName() + " SET b = b * 2 WHERE b = 22", 1);
+            assertQuery("SELECT id, a, b, c FROM " + table.getName(), "VALUES (1, 0, 2, 3), (2, 11, 12, 14), (3, 21, 44, 23)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testUpdateAllValues()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "test_update_all_values_", "(id INT, a INT, b INT, c INT)", List.of("1, 1, 2, 3", "2, 11, 12, 13", "3, 21, 22, 23"), "id")) {
+            assertUpdate("UPDATE " + table.getName() + " SET a = a + 1, b = b - 1, c = c * 2", 3);
+            assertQuery("SELECT id, a, b, c FROM " + table.getName(), "VALUES (1, 2, 1, 6), (2, 12, 11, 26), (3, 22, 21, 46)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testUpdateCaseSensitivity()
+    {
+        try (TestTable table = createTestTableForWrites("test_row_update_", "AS SELECT * FROM nation", "name")) {
+            assertUpdate("UPDATE " + table.getName() + " SET NATIONKEY = 100 WHERE REGIONKEY = 2", 5);
+            assertQuery("SELECT count(*) FROM " + table.getName() + " WHERE nationkey = 100", "VALUES 5");
+        }
+    }
+
+    @Test
+    @Override
+    public void testMergeFruits()
+    {
+        try (TestTable target = createTestTableForWrites(
+                "merge_fruits_target_",
+                "(customer VARCHAR, purchase VARCHAR)",
+                List.of("'Dave', 'dates'", "'Lou', 'limes'", "'Carol', 'candles'"),
+                "purchase");
+                TestTable source = createTestTableForWrites(
+                        "merge_fruits_source_",
+                        "(customer VARCHAR, purchase VARCHAR)",
+                        List.of("'Craig', 'candles'", "'Len', 'limes'", "'Joe', 'jellybeans'"),
+                        "customer,purchase")) {
+            assertUpdate("MERGE INTO " + target.getName() + " t USING " + source.getName() + " s ON t.purchase = s.purchase " +
+                    "WHEN MATCHED AND s.purchase = 'limes' THEN DELETE " +
+                    "WHEN MATCHED THEN UPDATE SET customer = CONCAT(t.customer, '_', s.customer) " +
+                    "WHEN NOT MATCHED THEN INSERT (customer, purchase) VALUES (s.customer, s.purchase)", 3);
+            assertQuery("SELECT * FROM " + target.getName(),
+                    "VALUES ('Dave', 'dates'), ('Carol_Craig', 'candles'), ('Joe', 'jellybeans')");
+        }
+    }
+
+    // Every column includes the physical key, which YQL UPDATE cannot change.
+    // https://ydb.tech/docs/en/yql/reference/syntax/update
+    @Test
+    @Override
+    public void testMergeAllColumnsUpdated()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "merge_all_columns_", "(customer VARCHAR, purchases INT, address VARCHAR)", List.of("'Aaron', 5, 'Antioch'"), "customer")) {
+            assertThat(query("MERGE INTO " + table.getName() + " t USING (VALUES ('Aaron', 6, 'Arches')) s(customer,purchases,address) " +
+                    "ON t.customer=s.customer WHEN MATCHED THEN UPDATE SET customer=CONCAT(t.customer,'_updated'),purchases=s.purchases+t.purchases,address=s.address"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES ('Aaron', 5, 'Antioch')");
+        }
+    }
+
+    // The inherited statement also updates physical key col1; non-key casts are tested separately.
+    // https://ydb.tech/docs/en/yql/reference/syntax/update
+    @Test
+    @Override
+    public void testMergeCasts()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "merge_cast_key_",
+                "(col1 INT, col2 DOUBLE, col3 INT, col4 BIGINT, col5 REAL, col6 DOUBLE)",
+                List.of("1, 2, 3, 4, 5, 6"),
+                "col1")) {
+            assertThat(query("MERGE INTO " + table.getName() + " t " +
+                    "USING (VALUES (BIGINT '2', REAL '3', DOUBLE '4', 5, 6, REAL '7')) s(col1,col2,col3,col4,col5,col6) " +
+                    "ON t.col1+1=s.col1 WHEN MATCHED THEN UPDATE SET col1=s.col1,col2=s.col2,col3=s.col3,col4=s.col4,col5=s.col5,col6=s.col6"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 2.0, 3, 4, 5.0, 6.0)");
+        }
+    }
+
+    // Reversing assignment order does not permit updating physical key a.
+    // https://ydb.tech/docs/en/yql/reference/syntax/update
+    @Test
+    @Override
+    public void testMergeAllColumnsReversed()
+    {
+        try (TestTable table = createTestTableForWrites("merge_reversed_key_", "(a INT, b INT, c INT)", List.of("1, 2, 3"), "a")) {
+            assertThat(query("MERGE INTO " + table.getName() + " t USING (VALUES 1) s(a) ON t.a=s.a " +
+                    "WHEN MATCHED THEN UPDATE SET c=100,b=42,a=0"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 2, 3)");
+        }
     }
 
     @Test
@@ -72,10 +315,6 @@ public class TestYdbConnectorTest
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
-                 // The generic mutation contract also requires row-level MERGE fallback.
-                 SUPPORTS_UPDATE,
-                 SUPPORTS_DELETE,
-                 SUPPORTS_MERGE,
                  SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN,
                  SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE,
                  SUPPORTS_AGGREGATION_PUSHDOWN_STDDEV,
@@ -107,6 +346,11 @@ public class TestYdbConnectorTest
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
             case SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_UPDATE,
+                 SUPPORTS_DELETE,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_ROW_LEVEL_UPDATE,
+                 SUPPORTS_ROW_LEVEL_DELETE,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_TOPN_PUSHDOWN,
                  SUPPORTS_LIMIT_PUSHDOWN,
@@ -412,6 +656,9 @@ public class TestYdbConnectorTest
     @Test
     public void testUnsupportedMutationsRejected()
     {
+        Session defaultWriteSession = Session.builder(getSession())
+                .setCatalogSessionProperty("local", "non_transactional_merge", "false")
+                .build();
         JdbcSqlExecutor executor = new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb));
         try (TestTable table = new TestTable(
                 executor,
@@ -424,7 +671,7 @@ public class TestYdbConnectorTest
                     "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
                             "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
                     "ALTER TABLE " + table.getName() + " RENAME COLUMN value TO renamed_value")) {
-                assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
+                assertThat(query(defaultWriteSession, sql)).failure().hasErrorCode(NOT_SUPPORTED);
             }
             assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), 'original')");
         }
