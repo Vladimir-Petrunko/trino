@@ -51,7 +51,8 @@ public class TestYdbConnectorSmokeTest
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
-                 SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
+                 SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN,
+                 SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_TOPN_PUSHDOWN,
                  SUPPORTS_LIMIT_PUSHDOWN,
@@ -81,6 +82,7 @@ public class TestYdbConnectorSmokeTest
             case SUPPORTS_ADD_COLUMN,
                  SUPPORTS_DROP_COLUMN,
                  SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
                  SUPPORTS_DROP_NOT_NULL_CONSTRAINT -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
