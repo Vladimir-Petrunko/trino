@@ -18,6 +18,8 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Closer;
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
+import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
+import io.trino.plugin.base.aggregation.AggregateFunctionRule;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
 import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.base.projection.ProjectFunctionRewriter;
@@ -37,11 +39,18 @@ import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteMapping;
+import io.trino.plugin.jdbc.aggregation.ImplementAvgFloatingPoint;
+import io.trino.plugin.jdbc.aggregation.ImplementCount;
+import io.trino.plugin.jdbc.aggregation.ImplementCountAll;
+import io.trino.plugin.jdbc.aggregation.ImplementCountDistinct;
+import io.trino.plugin.jdbc.aggregation.ImplementMinMax;
+import io.trino.plugin.jdbc.aggregation.ImplementSum;
 import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
 import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.plugin.jdbc.expression.RewriteIn;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
@@ -139,6 +148,7 @@ public class YdbClient
 
     private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
     private final ProjectFunctionRewriter<JdbcExpression, ParameterizedExpression> projectFunctionRewriter;
+    private final AggregateFunctionRewriter<JdbcExpression, ParameterizedExpression> aggregateFunctionRewriter;
 
     @Inject
     public YdbClient(
@@ -177,6 +187,17 @@ public class YdbClient
                 ImmutableSet.<ProjectFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
                         .add(new RewriteUnaryStringOperations())
                         .add(new RewriteStringPosition())
+                        .build());
+        JdbcTypeHandle bigintTypeHandle = YdbTypeUtils.toTypeHandle(BIGINT).orElseThrow();
+        aggregateFunctionRewriter = new AggregateFunctionRewriter<>(
+                connectorExpressionRewriter,
+                ImmutableSet.<AggregateFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
+                        .add(new ImplementCountAll(bigintTypeHandle))
+                        .add(new ImplementMinMax(true))
+                        .add(new ImplementCount(bigintTypeHandle))
+                        .add(new ImplementCountDistinct(bigintTypeHandle, true))
+                        .add(new ImplementSum(YdbTypeUtils::toTypeHandle))
+                        .add(new ImplementAvgFloatingPoint())
                         .build());
     }
 
@@ -224,6 +245,41 @@ public class YdbClient
             };
         }
         return expression.getChildren().stream().allMatch(child -> supportsExpression(child, assignments));
+    }
+
+    @Override
+    public boolean supportsAggregationPushdown(
+            ConnectorSession session,
+            JdbcTableHandle table,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        return groupingSets.stream().flatMap(List::stream).map(JdbcColumnHandle.class::cast)
+                .allMatch(column -> hasSupportedValueMapping(column)
+                        && !column.getColumnType().equals(REAL) && !column.getColumnType().equals(DOUBLE));
+    }
+
+    @Override
+    public Optional<JdbcExpression> implementAggregation(
+            ConnectorSession session,
+            AggregateFunction aggregate,
+            Map<String, ColumnHandle> assignments)
+    {
+        if (aggregate.getArguments().stream().anyMatch(argument ->
+                argument instanceof Variable variable
+                        ? !hasSupportedValueMapping((JdbcColumnHandle) assignments.get(variable.getName()))
+                        : !supportsExpression(argument, assignments))) {
+            return Optional.empty();
+        }
+        boolean floatingArgument = aggregate.getArguments().stream().anyMatch(argument -> argument.getType().equals(REAL) || argument.getType().equals(DOUBLE));
+        if ((aggregate.getFunctionName().equals("sum") || aggregate.getFunctionName().equals("avg")) && !floatingArgument) {
+            return Optional.empty();
+        }
+        if (floatingArgument && (aggregate.getFunctionName().equals("min") || aggregate.getFunctionName().equals("max") || aggregate.isDistinct())) {
+            return Optional.empty();
+        }
+        return aggregateFunctionRewriter.rewrite(session, aggregate, assignments);
     }
 
     @Override
