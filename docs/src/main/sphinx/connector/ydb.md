@@ -149,8 +149,21 @@ values. Top-N preserves the requested NULL ordering and Trino's ordering of
 NaN and signed zero. Native decimal and forced string mappings retain sorting
 in Trino.
 
-Joins are evaluated by Trino. Domain predicates continue to use the JDBC
-connector's type-specific pushdown controllers.
+JOIN pushdown is disabled by default. Enable the `join_pushdown_enabled`
+catalog session property to push down `INNER`, `LEFT`, `RIGHT`, and `FULL`
+joins with equality conditions on supported scalar columns, including
+multiple equality keys. Keep `complex_join_pushdown_enabled` disabled: the
+expression-based JOIN API does not preserve the source ownership required
+by YQL `ON` conditions.
+
+NULL keys do not match. Floating-point NaN keys do not match, while positive
+and negative zero match. Unsigned 64-bit keys use a lossless decimal
+representation. Native decimal keys, forced string mappings, inequalities,
+null-safe equality, and unsupported computed or cast keys remain in Trino.
+This opt-in path does not provide cost-based JOIN selection.
+
+Domain predicates continue to use the JDBC connector's type-specific
+pushdown controllers.
 
 The connector defaults the JDBC driver option `cacheConnectionsInDriver` to
 `false` because JDBC 2.4.1 can race cached context lookup against last-close
