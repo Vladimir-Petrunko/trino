@@ -31,12 +31,14 @@ import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
+import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteMapping;
@@ -56,6 +58,8 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.JoinStatistics;
+import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.expression.ConnectorExpression;
@@ -126,6 +130,7 @@ import static io.trino.plugin.ydb.YdbTableProperties.PRIMARY_KEY_PROPERTY;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
+import static io.trino.spi.connector.JoinCondition.Operator.EQUAL;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
@@ -205,6 +210,15 @@ public class YdbClient
                         .build());
     }
 
+    @Override
+    protected boolean isSupportedJoinCondition(ConnectorSession session, JdbcJoinCondition condition)
+    {
+        return condition.getOperator() == EQUAL
+                && condition.getLeftColumn().getColumnType().equals(condition.getRightColumn().getColumnType())
+                && hasSupportedValueMapping(condition.getLeftColumn())
+                && hasSupportedValueMapping(condition.getRightColumn());
+    }
+
     private boolean hasSupportedValueMapping(JdbcColumnHandle column)
     {
         JdbcTypeHandle type = column.getJdbcTypeHandle();
@@ -262,6 +276,21 @@ public class YdbClient
         return groupingSets.stream().flatMap(List::stream).map(JdbcColumnHandle.class::cast)
                 .allMatch(column -> hasSupportedValueMapping(column)
                         && !column.getColumnType().equals(REAL) && !column.getColumnType().equals(DOUBLE));
+    }
+
+    @Override
+    public Optional<PreparedQuery> implementJoin(
+            ConnectorSession session,
+            JoinType joinType,
+            PreparedQuery leftSource,
+            Map<JdbcColumnHandle, String> leftProjections,
+            PreparedQuery rightSource,
+            Map<JdbcColumnHandle, String> rightProjections,
+            List<ParameterizedExpression> joinConditions,
+            JoinStatistics statistics)
+    {
+        // The expression API loses which source owns each YQL ON operand.
+        return Optional.empty();
     }
 
     @Override

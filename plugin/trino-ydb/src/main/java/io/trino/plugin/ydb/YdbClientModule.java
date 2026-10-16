@@ -15,6 +15,7 @@ package io.trino.plugin.ydb;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.Provides;
+import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
@@ -22,6 +23,7 @@ import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
+import io.trino.plugin.jdbc.JdbcMetadataConfig;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
@@ -29,6 +31,8 @@ import tech.ydb.jdbc.YdbDriver;
 
 import java.util.Properties;
 
+import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
+import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.trino.plugin.jdbc.JdbcModule.bindTablePropertiesProvider;
 
 public class YdbClientModule
@@ -37,6 +41,11 @@ public class YdbClientModule
     @Override
     protected void configure()
     {
+        configBinder(binder()).bindConfigDefaults(JdbcMetadataConfig.class, config -> config.setComplexJoinPushdownEnabled(false));
+        newOptionalBinder(binder(), QueryBuilder.class)
+                .setBinding()
+                .to(YdbQueryBuilder.class)
+                .in(Scopes.SINGLETON);
         bindTablePropertiesProvider(binder(), YdbTableProperties.class);
     }
 
