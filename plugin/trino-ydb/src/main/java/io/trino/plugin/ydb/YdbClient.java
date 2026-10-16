@@ -32,6 +32,7 @@ import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
+import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongWriteFunction;
@@ -56,6 +57,7 @@ import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.Variable;
@@ -82,8 +84,10 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.jdbc.DefaultJdbcMetadata.MERGE_ROW_ID;
@@ -452,6 +456,55 @@ public class YdbClient
                 BOOLEAN,
                 ResultSet::getBoolean,
                 BooleanWriteFunction.of(Types.BOOLEAN, PreparedStatement::setBoolean));
+    }
+
+    @Override
+    public boolean supportsTopN(ConnectorSession session, JdbcTableHandle handle, List<JdbcSortItem> sortOrder)
+    {
+        return sortOrder.stream().allMatch(item -> hasSupportedValueMapping(item.column()));
+    }
+
+    @Override
+    protected Optional<TopNFunction> topNFunction()
+    {
+        return Optional.of((query, sortItems, limit) -> {
+            String orderBy = sortItems.stream()
+                    .flatMap(sortItem -> {
+                        String columnName = quoted(sortItem.column().getColumnName());
+                        SortOrder sortOrder = sortItem.sortOrder();
+                        String nullSort = "CASE WHEN %s IS NULL THEN %s ELSE %s END ASC".formatted(
+                                columnName, sortOrder.isNullsFirst() ? 0 : 1, sortOrder.isNullsFirst() ? 1 : 0);
+                        String direction = sortOrder.isAscending() ? "ASC" : "DESC";
+                        Type type = sortItem.column().getColumnType();
+                        if (type.equals(REAL) || type.equals(DOUBLE)) {
+                            String nanDirection = sortOrder.isNullsFirst() == sortOrder.isAscending() ? "DESC" : "ASC";
+                            String nanSort = "CASE WHEN %1$s != %1$s THEN 1 ELSE 0 END %2$s".formatted(columnName, nanDirection);
+                            String yqlType = type.equals(REAL) ? "Float" : "Double";
+                            return Stream.of(nullSort, nanSort, "NANVL(%s, CAST(0 AS %s)) %s".formatted(columnName, yqlType, direction));
+                        }
+                        return Stream.of(nullSort, columnName + " " + direction);
+                    })
+                    .collect(joining(", "));
+            return format("%s ORDER BY %s LIMIT %d", query, orderBy, limit);
+        });
+    }
+
+    @Override
+    public boolean isTopNGuaranteed(ConnectorSession session)
+    {
+        return true;
+    }
+
+    @Override
+    protected Optional<BiFunction<String, Long, String>> limitFunction()
+    {
+        return Optional.of((sql, limit) -> sql + " LIMIT " + limit);
+    }
+
+    @Override
+    public boolean isLimitGuaranteed(ConnectorSession session)
+    {
+        return true;
     }
 
     @Override
