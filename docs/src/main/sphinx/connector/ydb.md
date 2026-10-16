@@ -114,10 +114,27 @@ is not supported.
 Schema changes, renaming columns, changing column types, `TRUNCATE`, `UPDATE`,
 `DELETE`, and `MERGE` are not supported.
 
-Joins, aggregations, scalar expressions, sorting, and limits are evaluated
-by Trino. Predicates use the JDBC connector's type-specific pushdown
-controllers; unsigned, floating-point, decimal, and legacy temporal values
-remain in Trino where native parameter or comparison semantics differ.
+## Pushdown
+
+The connector can push down supported comparisons, `IN`, null checks, and
+`NULLIF`. Supported projections include `lower`, `upper`, and `strpos`. Case
+conversion and substring positions use Unicode operations. Integral division
+and modulus can be pushed down for a nonzero constant divisor other than `-1`.
+
+Arithmetic that can overflow or divide by zero, general arithmetic expressions,
+varchar concatenation, `LIKE`, and unsupported functions remain in Trino.
+Concatenation retains Trino's result-length limit and error behavior.
+Bounded `varchar` projections also remain in Trino because YDB text result
+columns map to unbounded `varchar`.
+Expressions over unsigned,
+floating-point, native decimal, date, and legacy temporal columns also remain
+in Trino where native value or comparison semantics differ. Disabling the JDBC
+`complex_expression_pushdown` session property retains expression evaluation in
+Trino.
+
+Joins, aggregations, sorting, and limits are evaluated by Trino. Domain
+predicates continue to use the JDBC connector's type-specific pushdown
+controllers.
 
 The connector defaults the JDBC driver option `cacheConnectionsInDriver` to
 `false` because JDBC 2.4.1 can race cached context lookup against last-close

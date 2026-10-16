@@ -18,13 +18,17 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Closer;
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
+import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
 import io.trino.plugin.base.mapping.IdentifierMapping;
+import io.trino.plugin.base.projection.ProjectFunctionRewriter;
+import io.trino.plugin.base.projection.ProjectFunctionRule;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.BooleanWriteFunction;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
+import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
@@ -33,13 +37,21 @@ import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteMapping;
+import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
+import io.trino.plugin.jdbc.expression.RewriteIn;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Constant;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import jakarta.annotation.Nullable;
@@ -65,6 +77,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.jdbc.DefaultJdbcMetadata.MERGE_ROW_ID;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.isNonTransactionalInsert;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
@@ -124,6 +137,9 @@ public class YdbClient
     private static final int YDB_DEFAULT_DECIMAL_PRECISION = 22;
     private static final int YDB_DEFAULT_DECIMAL_SCALE = 9;
 
+    private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
+    private final ProjectFunctionRewriter<JdbcExpression, ParameterizedExpression> projectFunctionRewriter;
+
     @Inject
     public YdbClient(
             BaseJdbcConfig config,
@@ -139,6 +155,115 @@ public class YdbClient
                 identifierMapping,
                 remoteQueryModifier,
                 false);
+
+        connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
+                .addStandardRules(this::quoted)
+                .add(new RewriteIn())
+                .add(new RewriteDivideModulus())
+                .add(new RewriteNullIf())
+                .withTypeClass("comparable_type", ImmutableSet.of(
+                        "tinyint", "smallint", "integer", "bigint", "decimal", "real", "double", "varchar", "char", "date", "timestamp"))
+                .map("$equal(left, right)").to("left = right")
+                .map("$not_equal(left, right)").to("left <> right")
+                .map("$less_than(left: comparable_type, right: comparable_type)").to("left < right")
+                .map("$less_than_or_equal(left: comparable_type, right: comparable_type)").to("left <= right")
+                .map("$greater_than(left: comparable_type, right: comparable_type)").to("left > right")
+                .map("$greater_than_or_equal(left: comparable_type, right: comparable_type)").to("left >= right")
+                .map("$is_null(value)").to("value IS NULL")
+                .map("$not($is_null(value))").to("value IS NOT NULL")
+                .build();
+        projectFunctionRewriter = new ProjectFunctionRewriter<>(
+                connectorExpressionRewriter,
+                ImmutableSet.<ProjectFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
+                        .add(new RewriteUnaryStringOperations())
+                        .add(new RewriteStringPosition())
+                        .build());
+    }
+
+    private boolean hasSupportedValueMapping(JdbcColumnHandle column)
+    {
+        JdbcTypeHandle type = column.getJdbcTypeHandle();
+        if (getForcedMappingToVarchar(type).isPresent()) {
+            return false;
+        }
+        String name = type.jdbcTypeName().orElse("").toLowerCase(Locale.ROOT);
+        return switch (name) {
+            case "bool" -> column.getColumnType().equals(BOOLEAN);
+            case "int8" -> column.getColumnType().equals(TINYINT);
+            case "int16", "uint8" -> column.getColumnType().equals(SMALLINT);
+            case "int32", "uint16" -> column.getColumnType().equals(INTEGER);
+            case "int64", "uint32" -> column.getColumnType().equals(BIGINT);
+            case "uint64" -> column.getColumnType().equals(createDecimalType(20, 0));
+            case "float" -> column.getColumnType().equals(REAL);
+            case "double" -> column.getColumnType().equals(DOUBLE);
+            case "utf8", "text" -> column.getColumnType() instanceof VarcharType;
+            case "date", "date32" -> column.getColumnType().equals(DATE);
+            case "datetime", "datetime64", "timestamp", "timestamp64" -> column.getColumnType().equals(TIMESTAMP_MICROS);
+            case "string", "bytes" -> column.getColumnType().equals(VARBINARY);
+            // Native Decimal admits NaN and infinities, which Trino DECIMAL cannot represent.
+            default -> false;
+        };
+    }
+
+    private boolean supportsExpression(ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        if (expression instanceof Constant constant) {
+            return YdbTypeUtils.toTypeHandle(constant.getType()).isPresent() &&
+                    (!(constant.getType() instanceof TimestampType) || constant.getValue() == null ||
+                            YdbColumnMappings.isTimestamp64ValueSupported((long) constant.getValue()));
+        }
+        if (expression instanceof Variable variable) {
+            JdbcColumnHandle column = (JdbcColumnHandle) assignments.get(variable.getName());
+            if (!hasSupportedValueMapping(column)) {
+                return false;
+            }
+            return switch (column.getJdbcTypeHandle().jdbcTypeName().orElse("").toLowerCase(Locale.ROOT)) {
+                case "uint8", "uint16", "uint32", "uint64", "float", "double",
+                     "date", "date32", "datetime", "datetime64", "timestamp" -> false;
+                default -> true;
+            };
+        }
+        return expression.getChildren().stream().allMatch(child -> supportsExpression(child, assignments));
+    }
+
+    @Override
+    public Optional<ParameterizedExpression> convertPredicate(
+            ConnectorSession session,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments)
+    {
+        if (!supportsExpression(expression, assignments)) {
+            return Optional.empty();
+        }
+        return connectorExpressionRewriter.rewrite(session, expression, assignments);
+    }
+
+    @Override
+    public Optional<JdbcExpression> convertProjection(
+            ConnectorSession session,
+            JdbcTableHandle handle,
+            ConnectorExpression expression,
+            Map<String, ColumnHandle> assignments)
+    {
+        if (!handle.getUpdateAssignments().isEmpty() || assignments.values().stream()
+                .filter(JdbcColumnHandle.class::isInstance)
+                .map(JdbcColumnHandle.class::cast)
+                .anyMatch(column -> column.getColumnName().equals(MERGE_ROW_ID))) {
+            return Optional.empty();
+        }
+        if (expression.getType() instanceof VarcharType varcharType && !varcharType.isUnbounded()) {
+            return Optional.empty();
+        }
+        if (!supportsExpression(expression, assignments)) {
+            return Optional.empty();
+        }
+        JdbcTypeHandle typeHandle = YdbTypeUtils.toTypeHandle(expression.getType()).orElse(null);
+        if (typeHandle == null) {
+            return Optional.empty();
+        }
+        return connectorExpressionRewriter.rewrite(session, expression, assignments)
+                .map(result -> new JdbcExpression(result.expression(), result.parameters(), typeHandle))
+                .or(() -> projectFunctionRewriter.rewrite(session, handle, expression, assignments));
     }
 
     @Override
