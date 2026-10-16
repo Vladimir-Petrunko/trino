@@ -129,7 +129,6 @@ import static io.trino.plugin.ydb.YdbColumnMappings.unsignedColumnMapping;
 import static io.trino.plugin.ydb.YdbTableProperties.PRIMARY_KEY_PROPERTY;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
 import static io.trino.spi.connector.JoinCondition.Operator.EQUAL;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -671,13 +670,75 @@ public class YdbClient
     @Override
     public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle)
     {
-        throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            PreparedQuery preparedQuery = queryBuilder.prepareDeleteQuery(
+                    this,
+                    session,
+                    connection,
+                    handle.getRequiredNamedRelation(),
+                    handle.getConstraint(),
+                    getAdditionalPredicate(handle.getConstraintExpressions(), Optional.empty()));
+            List<JdbcColumnHandle> primaryKeys = getPrimaryKeys(session, handle.getRequiredNamedRelation().getRemoteTableName());
+            return OptionalLong.of(executeReturningDml(session, connection, primaryKeys, preparedQuery));
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
     }
 
     @Override
     public OptionalLong update(ConnectorSession session, JdbcTableHandle handle)
     {
-        throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
+        List<JdbcColumnHandle> primaryKeys = getPrimaryKeys(session, handle.getRequiredNamedRelation().getRemoteTableName());
+        verifyNoPrimaryKeyUpdate(
+                primaryKeys,
+                handle.getUpdateAssignments().stream().map(assignment -> (ColumnHandle) assignment.column()).toList());
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            PreparedQuery preparedQuery = queryBuilder.prepareUpdateQuery(
+                    this,
+                    session,
+                    connection,
+                    handle.getRequiredNamedRelation(),
+                    handle.getConstraint(),
+                    getAdditionalPredicate(handle.getConstraintExpressions(), Optional.empty()),
+                    handle.getUpdateAssignments());
+            return OptionalLong.of(executeReturningDml(session, connection, primaryKeys, preparedQuery));
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
+    private static void verifyNoPrimaryKeyUpdate(List<JdbcColumnHandle> primaryKeys, Collection<ColumnHandle> updatedColumns)
+    {
+        if (updatedColumns.stream().anyMatch(primaryKeys::contains)) {
+            throw new TrinoException(
+                    NOT_SUPPORTED,
+                    "YDB does not support updating primary key columns: https://ydb.tech/docs/en/yql/reference/syntax/update");
+        }
+    }
+
+    private long executeReturningDml(
+            ConnectorSession session,
+            Connection connection,
+            List<JdbcColumnHandle> primaryKeys,
+            PreparedQuery preparedQuery)
+            throws SQLException
+    {
+        if (primaryKeys.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "YDB DML requires a table primary key");
+        }
+        PreparedQuery returningQuery = preparedQuery.transformQuery(
+                query -> query + " RETURNING " + quoted(primaryKeys.getFirst().getColumnName()));
+
+        long affectedRows = 0;
+        try (PreparedStatement statement = queryBuilder.prepareStatement(this, session, connection, returningQuery, Optional.of(1));
+                ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                affectedRows++;
+            }
+        }
+        return affectedRows;
     }
 
     @Override
