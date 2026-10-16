@@ -143,8 +143,14 @@ and native decimal aggregation stay in Trino to preserve value and error
 semantics. Disabling the `aggregation_pushdown_enabled` catalog session
 property retains aggregation in Trino.
 
-Joins, sorting, and limits are evaluated by Trino. Domain predicates continue
-to use the JDBC connector's type-specific pushdown controllers.
+The connector supports limit and Top-N pushdown for supported value mappings,
+including text, unsigned integers, dates, timestamps, and floating-point
+values. Top-N preserves the requested NULL ordering and Trino's ordering of
+NaN and signed zero. Native decimal and forced string mappings retain sorting
+in Trino.
+
+Joins are evaluated by Trino. Domain predicates continue to use the JDBC
+connector's type-specific pushdown controllers.
 
 The connector defaults the JDBC driver option `cacheConnectionsInDriver` to
 `false` because JDBC 2.4.1 can race cached context lookup against last-close
