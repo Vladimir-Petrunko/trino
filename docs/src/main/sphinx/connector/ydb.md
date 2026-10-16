@@ -94,6 +94,8 @@ By default, INSERT writes batches to a temporary table and publishes them with
 one native INSERT SELECT statement. A duplicate key makes that statement fail
 without publishing the staged rows. CTAS publishes its temporary table only
 after the write succeeds. Query and task retries are not supported.
+The final INSERT SELECT is subject to YDB's transaction size and memory limits;
+staging does not make a single INSERT unlimited.
 
 The JDBC `non_transactional_insert` session property bypasses staging when
 explicitly enabled. In that mode, completed batches can remain after a failure.

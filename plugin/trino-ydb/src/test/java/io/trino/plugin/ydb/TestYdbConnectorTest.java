@@ -250,6 +250,102 @@ public class TestYdbConnectorTest
         }
     }
 
+    @Test
+    @Override
+    public void testDelete()
+    {
+        try (TestTable table = createTestTableForWrites("test_delete_", "AS SELECT * FROM orders", "orderkey")) {
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE custkey <= 100", "SELECT count(*) FROM orders WHERE custkey <= 100");
+            assertQuery("SELECT * FROM " + table.getName(), "SELECT * FROM orders WHERE custkey > 100");
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE custkey <= 300", "SELECT count(*) FROM orders WHERE custkey > 100 AND custkey <= 300");
+            assertQuery("SELECT * FROM " + table.getName(), "SELECT * FROM orders WHERE custkey > 300");
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE custkey <= 500", "SELECT count(*) FROM orders WHERE custkey > 300 AND custkey <= 500");
+            assertQuery("SELECT * FROM " + table.getName(), "SELECT * FROM orders WHERE custkey > 500");
+        }
+        try (TestTable table = createTestTableForWrites("test_delete_", "AS SELECT * FROM orders", "orderkey")) {
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE orderkey < 0", 0);
+        }
+        try (TestTable table = createTestTableForWrites("test_delete_", "AS SELECT * FROM orders", "orderkey")) {
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE orderkey > 5 AND orderkey < 4", 0);
+        }
+
+        String tableName = "test_delete_" + randomNameSuffix();
+        try {
+            // Keep the visible order key so repeated orderstatus values are not deduplicated.
+            assertExplainAnalyze("EXPLAIN ANALYZE CREATE TABLE " + tableName +
+                    " WITH (primary_key = ARRAY['orderkey']) AS SELECT orderkey, CAST(orderstatus AS VARCHAR(15)) orderstatus FROM orders");
+            assertQuery("SELECT * FROM " + tableName, "SELECT orderkey, orderstatus FROM orders");
+            assertExplainAnalyze("EXPLAIN ANALYZE INSERT INTO " + tableName +
+                    " SELECT orderkey + (SELECT max(orderkey) FROM orders), clerk FROM orders");
+            assertQuery("SELECT * FROM " + tableName,
+                    "SELECT orderkey, orderstatus FROM orders UNION ALL SELECT orderkey + (SELECT max(orderkey) FROM orders), clerk FROM orders");
+            assertExplainAnalyze("EXPLAIN ANALYZE DELETE FROM " + tableName + " WHERE TRUE");
+            assertQuery("SELECT count(*) FROM " + tableName, "VALUES 0");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    @Override
+    public void testDeleteWithVarcharPredicate()
+    {
+        try (TestTable table = createTestTableForWrites("test_delete_varchar_", "AS SELECT * FROM orders", "orderkey")) {
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE orderstatus = 'O'", "SELECT count(*) FROM orders WHERE orderstatus = 'O'");
+            assertQuery("SELECT * FROM " + table.getName(), "SELECT * FROM orders WHERE orderstatus <> 'O'");
+        }
+    }
+
+    @Test
+    @Override
+    public void testMergeFalseJoinCondition()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "merge_join_false_",
+                "(customer VARCHAR, purchases INT, address VARCHAR)",
+                List.of("'Aaron', 11, 'Antioch'", "'Bill', 7, 'Buena'"),
+                "address")) {
+            assertUpdate("MERGE INTO " + table.getName() + " t " +
+                    "USING (VALUES ('Carol', 9, 'Centreville')) s(customer,purchases,address) ON FALSE " +
+                    "WHEN NOT MATCHED THEN INSERT (customer,purchases,address) VALUES (s.customer,s.purchases,s.address)", 1);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES ('Aaron', 11, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 9, 'Centreville')");
+            assertUpdate("MERGE INTO " + table.getName() + " t " +
+                    "USING (VALUES ('Dave', 22, 'Darbyshire')) s(customer,purchases,address) ON t.customer != t.customer " +
+                    "WHEN NOT MATCHED THEN INSERT (customer,purchases,address) VALUES (s.customer,s.purchases,s.address)", 1);
+            assertQuery("SELECT * FROM " + table.getName(),
+                    "VALUES ('Aaron', 11, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 9, 'Centreville'), ('Dave', 22, 'Darbyshire')");
+            assertUpdate("MERGE INTO " + table.getName() + " t " +
+                    "USING (VALUES ('Ed', 7, 'Etherville')) s(customer,purchases,address) ON 23 - (12 + 10) > 1 " +
+                    "WHEN MATCHED THEN UPDATE SET customer = concat(s.customer, '_fooled_you') " +
+                    "WHEN NOT MATCHED THEN INSERT (customer,purchases,address) VALUES (s.customer,s.purchases,s.address)", 1);
+            assertQuery("SELECT * FROM " + table.getName(),
+                    "VALUES ('Aaron', 11, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 9, 'Centreville'), ('Dave', 22, 'Darbyshire'), ('Ed', 7, 'Etherville')");
+        }
+    }
+
+    @Test
+    @Override
+    public void testMergeLarge()
+    {
+        try (TestTable table = createTestTableForWrites(
+                "test_merge_large_", "(orderkey BIGINT, custkey BIGINT, totalprice DOUBLE)", "orderkey")) {
+            // Loading 1.5 million rows exceeds YDB's single INSERT SELECT transaction buffer.
+            Session seedSession = Session.builder(getSession())
+                    .setCatalogSessionProperty("local", "non_transactional_insert", "true")
+                    .build();
+            assertUpdate(seedSession, "INSERT INTO " + table.getName() + " SELECT orderkey, custkey, totalprice FROM tpch.sf1.orders", 1_500_000);
+            assertUpdate("MERGE INTO " + table.getName() + " t USING (SELECT * FROM tpch.sf1.orders) s ON t.orderkey = s.orderkey " +
+                    "WHEN MATCHED AND mod(s.orderkey, 3) = 0 THEN UPDATE SET totalprice = t.totalprice + s.totalprice " +
+                    "WHEN MATCHED AND mod(s.orderkey, 3) = 1 THEN DELETE", 1_000_000);
+            assertQuery("SELECT count(*) FROM " + table.getName() + " WHERE mod(orderkey, 3) = 1", "VALUES 0");
+            assertThat(query("SELECT count(*), sum(cast(totalprice AS decimal(18,2))) FROM " + table.getName() + " WHERE mod(orderkey, 3) = 2"))
+                    .matches("SELECT count(*), sum(cast(totalprice AS decimal(18,2))) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 2");
+            assertThat(query("SELECT count(*), sum(cast(totalprice AS decimal(18,2))) FROM " + table.getName() + " WHERE mod(orderkey, 3) = 0"))
+                    .matches("SELECT count(*), sum(cast(totalprice AS decimal(18,2)) * 2) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 0");
+        }
+    }
+
     // Every column includes the physical key, which YQL UPDATE cannot change.
     // https://ydb.tech/docs/en/yql/reference/syntax/update
     @Test
