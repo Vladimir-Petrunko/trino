@@ -158,8 +158,8 @@ public class TestYdbCreateTable
             assertQuery("SELECT * FROM " + table, "VALUES ('a', CAST(1 AS BIGINT)), ('b', CAST(2 AS BIGINT))");
             assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).isEqualTo(tablesBefore);
             assertThat(query("UPDATE " + table + " SET id = 3 WHERE id = 1")).failure().hasErrorCode(NOT_SUPPORTED);
-            assertThat(query("UPDATE " + table + " SET payload = 'changed' WHERE id = 2")).failure().hasErrorCode(NOT_SUPPORTED);
-            assertThat(query("DELETE FROM " + table + " WHERE id = 1")).failure().hasErrorCode(NOT_SUPPORTED);
+            assertThat(query("UPDATE " + table + " SET payload = upper(payload) WHERE id = 2")).failure().hasErrorCode(NOT_SUPPORTED);
+            assertThat(query("DELETE FROM " + table + " WHERE payload LIKE 'a%'")).failure().hasErrorCode(NOT_SUPPORTED);
             assertQuery("SELECT * FROM " + table, "VALUES ('a', CAST(1 AS BIGINT)), ('b', CAST(2 AS BIGINT))");
         }
         finally {

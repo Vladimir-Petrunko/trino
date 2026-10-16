@@ -72,6 +72,7 @@ public class TestYdbConnectorTest
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
+                 // The generic mutation contract also requires row-level MERGE fallback.
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
@@ -418,8 +419,8 @@ public class TestYdbConnectorTest
                 "(id Int64, value Utf8, PRIMARY KEY (id))")) {
             executor.execute("INSERT INTO " + table.getName() + " (id, value) VALUES (1, 'original'u)");
             for (String sql : List.of(
-                    "UPDATE " + table.getName() + " SET value = 'changed' WHERE id = 1",
-                    "DELETE FROM " + table.getName() + " WHERE id = 1",
+                    "UPDATE " + table.getName() + " SET id = 2 WHERE id = 1",
+                    "DELETE FROM " + table.getName() + " WHERE value LIKE '%g%'",
                     "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
                             "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
                     "ALTER TABLE " + table.getName() + " RENAME COLUMN value TO renamed_value")) {

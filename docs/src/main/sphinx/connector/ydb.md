@@ -111,8 +111,17 @@ is not supported.
 
 ## Limitations
 
-Schema changes, renaming columns, changing column types, `TRUNCATE`, `UPDATE`,
-`DELETE`, and `MERGE` are not supported.
+Schema changes, renaming columns, changing column types, `TRUNCATE`, and
+`MERGE` are not supported.
+
+`UPDATE` supports constant assignments to non-key columns, and `DELETE`
+supports predicates that can be fully pushed down. These statements execute
+as one native operation and count affected rows using `RETURNING`, including
+rows with nullable primary-key components. Statements requiring Trino-side
+predicate or assignment evaluation are not supported.
+
+Updating a physical primary-key column is rejected with `NOT_SUPPORTED` before
+mutation, as required by the [YQL UPDATE restriction](https://ydb.tech/docs/en/yql/reference/syntax/update).
 
 ## Pushdown
 

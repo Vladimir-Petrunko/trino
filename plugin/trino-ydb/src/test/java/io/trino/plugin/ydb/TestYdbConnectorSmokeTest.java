@@ -48,6 +48,7 @@ public class TestYdbConnectorSmokeTest
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
+                 // The generic mutation contract also requires row-level MERGE fallback.
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
