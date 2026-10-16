@@ -92,6 +92,20 @@ public class TestYdbConnectorSmokeTest
         return "(a bigint, b double) WITH (primary_key = ARRAY['a'])";
     }
 
+    @Test
+    public void testNativeExecute()
+    {
+        String catalog = getSession().getCatalog().orElseThrow();
+        try (TestTable table = newTrinoTable("test_native_execute_", getCreateTableDefaultDefinition())) {
+            assertUpdate("CALL %s.system.execute(query => 'INSERT INTO %s (a, b) VALUES (1, 2.5)')".formatted(catalog, table.getName()));
+            assertQuery("SELECT a, b FROM " + table.getName(), "VALUES (1, 2.5)");
+            assertUpdate("CALL %s.system.execute(query => 'UPDATE %s SET b = 3.5 WHERE a = 1')".formatted(catalog, table.getName()));
+            assertQuery("SELECT a, b FROM " + table.getName(), "VALUES (1, 3.5)");
+            assertUpdate("CALL %s.system.execute(query => 'DELETE FROM %s WHERE a = 1')".formatted(catalog, table.getName()));
+            assertQueryReturnsEmptyResult("SELECT * FROM " + table.getName());
+        }
+    }
+
     // The base test requires property-free CREATE, but YDB requires an explicit primary key.
     // https://ydb.tech/docs/en/yql/reference/syntax/create_table/
     @Test

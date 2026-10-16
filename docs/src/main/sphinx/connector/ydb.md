@@ -101,6 +101,9 @@ Every INSERT in that mode must explicitly supply all primary-key columns,
 including nullable key columns. Default staged INSERT supplies NULL for an
 omitted nullable primary-key column.
 
+The `system.execute` procedure executes native YQL directly. Statements passed
+to this procedure use YDB semantics rather than Trino SQL translation.
+
 ### Table and column changes
 
 The connector supports renaming a table within `default`, adding nullable
