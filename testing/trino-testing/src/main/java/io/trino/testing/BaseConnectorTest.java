@@ -1249,6 +1249,25 @@ public abstract class BaseConnectorTest
     }
 
     @Test
+    public void testCreateViewIfNotExists()
+    {
+        skipTestUnless(hasBehavior(SUPPORTS_CREATE_VIEW));
+
+        String viewName = "test_create_view_if_not_exists_" + randomNameSuffix();
+
+        try {
+            assertUpdate("CREATE VIEW IF NOT EXISTS " + viewName + " AS SELECT 1 AS x");
+            assertQuery("SELECT * FROM " + viewName, "SELECT 1");
+
+            assertUpdate("CREATE VIEW IF NOT EXISTS " + viewName + " AS SELECT 2 AS x");
+            assertQuery("SELECT * FROM " + viewName, "SELECT 1");
+        }
+        finally {
+            assertUpdate("DROP VIEW IF EXISTS " + viewName);
+        }
+    }
+
+    @Test
     public void testViewCaseSensitivity()
     {
         skipTestUnless(hasBehavior(SUPPORTS_CREATE_VIEW));
@@ -2232,14 +2251,16 @@ public abstract class BaseConnectorTest
         String viewName = "test_show_create_view" + randomNameSuffix();
         assertUpdate("DROP VIEW IF EXISTS " + viewName);
         String ddl = format(
-                "CREATE VIEW %s.%s.%s SECURITY DEFINER AS\n" +
-                        "SELECT *\n" +
-                        "FROM\n" +
-                        "  (\n" +
-                        " VALUES \n" +
-                        "     ROW(1, 'one')\n" +
-                        "   , ROW(2, 't')\n" +
-                        ")  t (col1, col2)",
+                """
+                CREATE VIEW %s.%s.%s SECURITY DEFINER AS
+                SELECT *
+                FROM
+                  (
+                 VALUES\s
+                     ROW(1, 'one')
+                   , ROW(2, 't')
+                )  t (col1, col2)\
+                """,
                 getSession().getCatalog().get(),
                 getSession().getSchema().get(),
                 viewName);
@@ -5513,12 +5534,16 @@ public abstract class BaseConnectorTest
             assertUpdate(
                     "DELETE FROM " + table.getName() + "\n" +
                             "WHERE (orderkey IN (SELECT CASE WHEN orderkey % 3 = 0 THEN NULL ELSE orderkey END FROM tpch.tiny.lineitem)) IS NULL\n",
-                    "SELECT count(*) FROM orders\n" +
-                            "WHERE (orderkey IN (SELECT CASE WHEN orderkey % 3 = 0 THEN NULL ELSE orderkey END FROM lineitem)) IS NULL\n");
+                    """
+                    SELECT count(*) FROM orders
+                    WHERE (orderkey IN (SELECT CASE WHEN orderkey % 3 = 0 THEN NULL ELSE orderkey END FROM lineitem)) IS NULL
+                    """);
             assertQuery(
                     "SELECT * FROM " + table.getName(),
-                    "SELECT * FROM orders\n" +
-                            "WHERE (orderkey IN (SELECT CASE WHEN orderkey % 3 = 0 THEN NULL ELSE orderkey END FROM lineitem)) IS NOT NULL\n");
+                    """
+                    SELECT * FROM orders
+                    WHERE (orderkey IN (SELECT CASE WHEN orderkey % 3 = 0 THEN NULL ELSE orderkey END FROM lineitem)) IS NOT NULL
+                    """);
         }
     }
 
