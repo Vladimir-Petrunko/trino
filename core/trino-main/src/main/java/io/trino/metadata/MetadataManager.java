@@ -29,6 +29,7 @@ import io.trino.Session;
 import io.trino.connector.CatalogHandle;
 import io.trino.connector.system.GlobalSystemConnector;
 import io.trino.metadata.LanguageFunctionManager.RunAsIdentityLoader;
+import io.trino.plugin.base.util.UncheckedCloser;
 import io.trino.security.AccessControl;
 import io.trino.security.InjectedConnectorAccessControl;
 import io.trino.spi.QueryId;
@@ -616,7 +617,7 @@ public final class MetadataManager
                 if (relationType.isPresent()) {
                     return ImmutableList.of(objectName.get());
                 }
-                // TODO we can probably return empty list here
+                // TODO return empty list here unless getRelationTypeIfExists caught exception, see also https://github.com/trinodb/trino/issues/6551
             }
             catch (RuntimeException e) {
                 handleListingError(e, prefix);
@@ -639,6 +640,7 @@ public final class MetadataManager
                 metadata.listTables(connectorSession, prefix.getSchemaName()).stream()
                         .map(convertFromSchemaTableName(prefix.getCatalogName()))
                         .filter(table -> !isExternalInformationSchema(catalogHandle, table.schemaName()))
+                        .filter(prefix::matches)
                         .forEach(tables::add);
             }
         }
@@ -816,7 +818,7 @@ public final class MetadataManager
             try {
                 columnMetadata.add(ColumnMetadata.builder()
                         .setName(column.getName())
-                        .setType(typeManager.getType(column.getType()))
+                        .setType(typeManager.fromPersistedSqlType(column.getType().getId()))
                         .setComment(column.getComment())
                         .build());
             }
@@ -835,7 +837,7 @@ public final class MetadataManager
             try {
                 columnMetadata.add(ColumnMetadata.builder()
                         .setName(column.getName())
-                        .setType(typeManager.getType(column.getType()))
+                        .setType(typeManager.fromPersistedSqlType(column.getType().getId()))
                         .setComment(column.getComment())
                         .build());
             }
@@ -1234,10 +1236,13 @@ public final class MetadataManager
     public void cleanupQuery(Session session)
     {
         QueryCatalogs queryCatalogs = catalogsByQueryId.remove(session.getQueryId());
-        if (queryCatalogs != null) {
-            queryCatalogs.finish();
+        try (var closer = UncheckedCloser.create()) {
+            // A connector failing to clean up must not leak the query's functions for the lifetime of the server
+            closer.register(() -> languageFunctionManager.unregisterQuery(session));
+            if (queryCatalogs != null) {
+                closer.register(queryCatalogs::finish);
+            }
         }
-        languageFunctionManager.unregisterQuery(session);
     }
 
     @Override
@@ -1704,13 +1709,13 @@ public final class MetadataManager
     }
 
     @Override
-    public void createView(Session session, QualifiedObjectName viewName, ViewDefinition definition, Map<String, Object> viewProperties, boolean replace)
+    public void createView(Session session, QualifiedObjectName viewName, ViewDefinition definition, Map<String, Object> viewProperties, SaveMode saveMode)
     {
         CatalogMetadata catalogMetadata = getCatalogMetadataForWrite(session, viewName.catalogName());
         CatalogHandle catalogHandle = catalogMetadata.getCatalogHandle();
         ConnectorMetadata metadata = catalogMetadata.getMetadata(session);
 
-        metadata.createView(session.toConnectorSession(catalogHandle), viewName.asSchemaTableName(), definition.toConnectorViewDefinition(), viewProperties, replace);
+        metadata.createView(session.toConnectorSession(catalogHandle), viewName.asSchemaTableName(), definition.toConnectorViewDefinition(), viewProperties, saveMode);
         if (catalogMetadata.getSecurityManagement() == SYSTEM) {
             systemSecurityMetadata.tableCreated(session, viewName.asCatalogSchemaTableName());
         }
@@ -3044,9 +3049,11 @@ public final class MetadataManager
                 catalogs = new ArrayList<>(this.catalogs.values());
             }
 
-            for (CatalogMetadata catalogMetadata : catalogs) {
-                ConnectorSession connectorSession = session.toConnectorSession(catalogMetadata.getCatalogHandle());
-                catalogMetadata.getMetadata(session).cleanupQuery(connectorSession);
+            try (var closer = UncheckedCloser.create()) {
+                for (CatalogMetadata catalogMetadata : catalogs) {
+                    ConnectorSession connectorSession = session.toConnectorSession(catalogMetadata.getCatalogHandle());
+                    closer.register(() -> catalogMetadata.getMetadata(session).cleanupQuery(connectorSession));
+                }
             }
         }
     }
