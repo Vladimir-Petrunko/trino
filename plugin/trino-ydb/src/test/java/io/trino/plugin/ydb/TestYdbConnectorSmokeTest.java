@@ -91,7 +91,7 @@ public class TestYdbConnectorSmokeTest
                 .failure().hasErrorCode(NOT_SUPPORTED);
         Assertions.assertThat(query("CALL %s.system.execute(query => 'CREATE TABLE native_execute_forbidden (id Int64, PRIMARY KEY (id))')".formatted(catalog)))
                 .failure().hasErrorCode(NOT_SUPPORTED);
-        assertQuery("SELECT COUNT(*) FROM nation", "VALUES BIGINT '25'");
+        assertQuery("SELECT COUNT(*) FROM nation", "VALUES 25");
     }
 
     @Test
