@@ -60,6 +60,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @ResourceLock("YDB_HELPER")
@@ -80,10 +81,10 @@ public class TestYdbMerge
     public void testConditionalMergeWithNullableCompositeKeys()
             throws Exception
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_nullable_",
                 "(value Int64, tenant Int64, id Int64, flag Bool, label Utf8, PRIMARY KEY (tenant, id))",
+                "value, tenant, id, flag, label",
                 List.of("10, 1, 11, true, 'A'u", "20, NULL, 12, NULL, 'B'u", "30, 2, NULL, false, NULL", "40, NULL, NULL, true, 'C'u"))) {
             try (Connection connection = DriverManager.getConnection(YdbQueryRunner.buildJdbcUrl(ydb));
                     ResultSet rows = connection.getMetaData().getPrimaryKeys(null, null, table.getName())) {
@@ -119,10 +120,10 @@ public class TestYdbMerge
     @Test
     public void testSelectiveUpdateCasesAndUnpushedRowChanges()
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_cases_",
                 "(left_value Int64, right_value Int64, flag Bool, id Int64, PRIMARY KEY (id))",
+                "left_value, right_value, flag, id",
                 List.of("10, 100, true, 1", "20, 200, NULL, 2", "30, 300, false, 3"))) {
             assertUpdate(mergeSession(),
                     """
@@ -144,10 +145,10 @@ public class TestYdbMerge
     @Test
     public void testEmptySourceAndUnmatchedConditions()
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_empty_",
                 "(value Int64, id Int64, PRIMARY KEY (id))",
+                "value, id",
                 List.of("10, 1"))) {
             assertUpdate(mergeSession(),
                     """
@@ -230,10 +231,10 @@ public class TestYdbMerge
     @Test
     public void testPhysicalPrimaryKeyUpdatesAreRejected()
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_key_guard_",
                 "(value Int64, id Int64, PRIMARY KEY (id))",
+                "value, id",
                 List.of("10, 1"))) {
             assertThat(query(mergeSession(),
                     """
@@ -247,10 +248,10 @@ public class TestYdbMerge
     @Test
     public void testDefaultRowChangesAreRejectedWithoutMutation()
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_opt_in_",
                 "(value Int64, id Int64, PRIMARY KEY (id))",
+                "value, id",
                 List.of("10, 1"))) {
             for (String sql : List.of(
                     "MERGE INTO " + table.getName() + " t USING (VALUES (1, 20)) s(id, value) ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
@@ -265,10 +266,10 @@ public class TestYdbMerge
     @Test
     public void testDuplicateSourceTargetMatchIsRejected()
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_duplicate_",
                 "(value Int64, id Int64, PRIMARY KEY (id))",
+                "value, id",
                 List.of("10, 1"))) {
             assertThat(query(mergeSession(),
                     """
@@ -283,10 +284,10 @@ public class TestYdbMerge
     @CsvSource({"2,10", "1,99"})
     public void testNativeBatchFailureRespectsTransactionBoundaries(int batchSize, int expectedValue)
     {
-        try (TestTable table = new TestTable(
-                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+        try (TestTable table = nativeTable(
                 "merge_batch_rollback_",
                 "(value Int64, id Int64, PRIMARY KEY (id))",
+                "value, id",
                 List.of("10, 1"))) {
             String jdbcUrl = YdbQueryRunner.buildJdbcUrl(ydb) + "&cacheConnectionsInDriver=false&replaceJdbcInByYqlList=false";
             YdbClient client = new YdbClient(
@@ -335,6 +336,26 @@ public class TestYdbMerge
                 sink.abort();
             }
             assertQuery("SELECT value, id FROM " + table.getName(), "VALUES (" + expectedValue + ", 1)");
+        }
+    }
+
+    private static TestTable nativeTable(String prefix, String definition, String columns, List<String> rows)
+    {
+        JdbcSqlExecutor executor = new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb));
+        TestTable table = new TestTable(executor, prefix, definition);
+        try {
+            executor.execute("INSERT INTO " + table.getName() + " (" + columns + ") VALUES " +
+                    rows.stream().map(row -> "(" + row + ")").collect(joining(", ")));
+            return table;
+        }
+        catch (RuntimeException e) {
+            try {
+                table.close();
+            }
+            catch (RuntimeException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
         }
     }
 
