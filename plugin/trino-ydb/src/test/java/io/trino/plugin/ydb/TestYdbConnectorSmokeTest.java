@@ -22,6 +22,8 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import tech.ydb.test.junit5.YdbHelperExtension;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+
 @ResourceLock("YDB_HELPER")
 public class TestYdbConnectorSmokeTest
         extends BaseConnectorSmokeTest
@@ -79,6 +81,17 @@ public class TestYdbConnectorSmokeTest
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
+    }
+
+    @Test
+    public void testNativeExecuteIsUnsupported()
+    {
+        String catalog = getSession().getCatalog().orElseThrow();
+        Assertions.assertThat(query("CALL %s.system.execute(query => 'UPDATE nation SET name = name WHERE nationkey = 1')".formatted(catalog)))
+                .failure().hasErrorCode(NOT_SUPPORTED);
+        Assertions.assertThat(query("CALL %s.system.execute(query => 'CREATE TABLE native_execute_forbidden (id Int64, PRIMARY KEY (id))')".formatted(catalog)))
+                .failure().hasErrorCode(NOT_SUPPORTED);
+        assertQuery("SELECT COUNT(*) FROM nation", "VALUES BIGINT '25'");
     }
 
     @Test

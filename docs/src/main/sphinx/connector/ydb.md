@@ -62,6 +62,7 @@ read-only strings without predicate pushdown.
 
 The connector is read-only. Creating, changing, or dropping tables and
 schemas, `INSERT`, `UPDATE`, `DELETE`, and `MERGE` are not supported.
+The `system.execute` native SQL procedure is also disabled.
 
 Joins, aggregations, scalar expressions, sorting, and limits are evaluated
 by Trino. Predicates use the JDBC connector's type-specific pushdown
