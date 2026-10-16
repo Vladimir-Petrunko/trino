@@ -40,6 +40,7 @@ public class TestYdbConnectorSmokeTest
     {
         return YdbQueryRunner.builder(ydb)
                 .setInitialTables(REQUIRED_TPCH_TABLES)
+                .amendSession(session -> session.setCatalogSessionProperty("local", "non_transactional_merge", "true"))
                 .build();
     }
 
@@ -48,10 +49,6 @@ public class TestYdbConnectorSmokeTest
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
-                 // The generic mutation contract also requires row-level MERGE fallback.
-                 SUPPORTS_UPDATE,
-                 SUPPORTS_DELETE,
-                 SUPPORTS_MERGE,
                  SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN,
                  SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE,
                  SUPPORTS_AGGREGATION_PUSHDOWN_STDDEV,
@@ -83,6 +80,11 @@ public class TestYdbConnectorSmokeTest
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
             case SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_UPDATE,
+                 SUPPORTS_DELETE,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_ROW_LEVEL_UPDATE,
+                 SUPPORTS_ROW_LEVEL_DELETE,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_TOPN_PUSHDOWN,
                  SUPPORTS_LIMIT_PUSHDOWN,
