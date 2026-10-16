@@ -27,6 +27,7 @@ import io.trino.plugin.jdbc.JdbcMetadataConfig;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
 import tech.ydb.jdbc.YdbDriver;
 
 import java.util.Properties;
@@ -45,6 +46,10 @@ public class YdbClientModule
         newOptionalBinder(binder(), QueryBuilder.class)
                 .setBinding()
                 .to(YdbQueryBuilder.class)
+                .in(Scopes.SINGLETON);
+        newOptionalBinder(binder(), ConnectorPageSinkProvider.class)
+                .setBinding()
+                .to(YdbPageSinkProvider.class)
                 .in(Scopes.SINGLETON);
         bindTablePropertiesProvider(binder(), YdbTableProperties.class);
     }

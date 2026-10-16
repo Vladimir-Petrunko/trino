@@ -94,6 +94,8 @@ By default, INSERT writes batches to a temporary table and publishes them with
 one native INSERT SELECT statement. A duplicate key makes that statement fail
 without publishing the staged rows. CTAS publishes its temporary table only
 after the write succeeds. Query and task retries are not supported.
+The final INSERT SELECT is subject to YDB's transaction size and memory limits;
+staging does not make a single INSERT unlimited.
 
 The JDBC `non_transactional_insert` session property bypasses staging when
 explicitly enabled. In that mode, completed batches can remain after a failure.
@@ -109,19 +111,32 @@ from non-key columns. Primary-key columns cannot be dropped or made nullable.
 Adding a column with `NOT NULL`, a default, a comment, or an explicit position
 is not supported.
 
-## Limitations
-
-Schema changes, renaming columns, changing column types, `TRUNCATE`, and
-`MERGE` are not supported.
+### Row changes
 
 `UPDATE` supports constant assignments to non-key columns, and `DELETE`
 supports predicates that can be fully pushed down. These statements execute
 as one native operation and count affected rows using `RETURNING`, including
-rows with nullable primary-key components. Statements requiring Trino-side
-predicate or assignment evaluation are not supported.
+rows with nullable primary-key components.
+
+`MERGE` and statements requiring Trino-side predicate or assignment evaluation
+require explicitly enabling the `non_transactional_merge` catalog session
+property:
+
+```sql
+SET SESSION example.non_transactional_merge = true;
+```
+
+In this mode, each bounded batch runs in its own transaction and closes its
+JDBC resources before returning. Completed batches can remain after a query
+failure. Query and task retries are not supported.
 
 Updating a physical primary-key column is rejected with `NOT_SUPPORTED` before
 mutation, as required by the [YQL UPDATE restriction](https://ydb.tech/docs/en/yql/reference/syntax/update).
+
+## Limitations
+
+Creating, dropping or renaming schemas, renaming columns, changing column types,
+and `TRUNCATE` are not supported.
 
 ## Pushdown
 

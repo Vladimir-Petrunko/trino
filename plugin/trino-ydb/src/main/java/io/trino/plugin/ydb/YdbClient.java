@@ -14,6 +14,7 @@
 package io.trino.plugin.ydb;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Closer;
 import com.google.common.primitives.Ints;
@@ -32,6 +33,7 @@ import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
+import io.trino.plugin.jdbc.JdbcMergeTableHandle;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcTableHandle;
@@ -60,6 +62,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
+import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.expression.ConnectorExpression;
@@ -89,6 +92,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -97,6 +101,7 @@ import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.jdbc.DefaultJdbcMetadata.MERGE_ROW_ID;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.isNonTransactionalInsert;
+import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.isNonTransactionalMerge;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
@@ -902,6 +907,64 @@ public class YdbClient
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, "Failed to create YDB INSERT staging table", e);
         }
+    }
+
+    @Override
+    public JdbcMergeTableHandle beginMerge(
+            ConnectorSession session,
+            JdbcTableHandle handle,
+            Map<Integer, Collection<ColumnHandle>> updateColumnHandles,
+            Consumer<Runnable> rollbackActionCollector,
+            RetryMode retryMode)
+    {
+        if (retryMode != RetryMode.NO_RETRIES) {
+            throw new TrinoException(NOT_SUPPORTED, "Query and task retries are not supported for direct YDB MERGE");
+        }
+        if (!isNonTransactionalMerge(session)) {
+            throw new TrinoException(
+                    NOT_SUPPORTED,
+                    "YDB row-level writes require non_transactional_merge=true; completed batches can remain after a failure");
+        }
+
+        List<JdbcColumnHandle> primaryKeys = getPrimaryKeys(session, handle.getRequiredNamedRelation().getRemoteTableName());
+        if (primaryKeys.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "The connector cannot perform MERGE on a table without a primary key");
+        }
+        updateColumnHandles.values().forEach(columns -> verifyNoPrimaryKeyUpdate(primaryKeys, columns));
+
+        SchemaTableName schemaTableName = handle.getRequiredNamedRelation().getSchemaTableName();
+        RemoteTableName remoteTableName = handle.getRequiredNamedRelation().getRemoteTableName();
+        RemoteTableName outputRemoteTableName = new RemoteTableName(
+                remoteTableName.getCatalogName(),
+                Optional.of(schemaTableName.getSchemaName()),
+                remoteTableName.getTableName());
+
+        List<JdbcColumnHandle> columns = getColumns(session, schemaTableName, remoteTableName);
+        JdbcOutputTableHandle outputTableHandle = new JdbcOutputTableHandle(
+                outputRemoteTableName,
+                columns.stream().map(JdbcColumnHandle::getColumnName).toList(),
+                columns.stream().map(JdbcColumnHandle::getColumnType).toList(),
+                Optional.of(columns.stream().map(JdbcColumnHandle::getJdbcTypeHandle).toList()),
+                Optional.empty(),
+                Optional.empty());
+
+        return new JdbcMergeTableHandle(
+                handle,
+                outputTableHandle,
+                ImmutableMap.of(),
+                Optional.empty(),
+                primaryKeys,
+                columns,
+                updateColumnHandles);
+    }
+
+    @Override
+    public void finishMerge(
+            ConnectorSession session,
+            JdbcMergeTableHandle tableHandle,
+            Set<Long> pageSinkIds)
+    {
+        // YdbMergeSink has already committed its bounded, non-transactional batches.
     }
 
     @Override
