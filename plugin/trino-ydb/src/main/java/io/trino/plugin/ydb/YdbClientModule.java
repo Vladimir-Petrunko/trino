@@ -17,7 +17,6 @@ import com.google.inject.AbstractModule;
 import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import io.trino.plugin.base.mapping.IdentifierMapping;
-import io.trino.plugin.base.security.AllowAllAccessControl;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
@@ -26,16 +25,11 @@ import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
-import io.trino.spi.TrinoException;
-import io.trino.spi.connector.ConnectorAccessControl;
-import io.trino.spi.connector.ConnectorSecurityContext;
-import io.trino.spi.connector.SchemaRoutineName;
 import tech.ydb.jdbc.YdbDriver;
 
 import java.util.Properties;
 
-import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.plugin.jdbc.JdbcModule.bindTablePropertiesProvider;
 
 public class YdbClientModule
         extends AbstractModule
@@ -43,18 +37,7 @@ public class YdbClientModule
     @Override
     protected void configure()
     {
-        newOptionalBinder(binder(), ConnectorAccessControl.class)
-                .setBinding()
-                .toInstance(new AllowAllAccessControl()
-                {
-                    @Override
-                    public void checkCanExecuteProcedure(ConnectorSecurityContext context, SchemaRoutineName procedure)
-                    {
-                        if (procedure.equals(new SchemaRoutineName("system", "execute"))) {
-                            throw new TrinoException(NOT_SUPPORTED, "This connector is read-only and does not support native execution");
-                        }
-                    }
-                });
+        bindTablePropertiesProvider(binder(), YdbTableProperties.class);
     }
 
     @Provides

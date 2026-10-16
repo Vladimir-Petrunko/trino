@@ -13,13 +13,8 @@
  */
 package io.trino.plugin.ydb;
 
-import io.trino.plugin.jdbc.JdbcTransactionHandle;
-import io.trino.spi.QueryId;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
-import io.trino.spi.connector.ConnectorSecurityContext;
-import io.trino.spi.connector.SchemaRoutineName;
-import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.TestingConnectorContext;
 import org.junit.jupiter.api.Test;
 
@@ -27,9 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT;
-import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestYdbPlugin
@@ -46,14 +39,6 @@ public class TestYdbPlugin
             try {
                 assertThat(connector.getPageSourceProvider()).isNotNull();
                 assertThat(connector.getCapabilities()).contains(NOT_NULL_COLUMN_CONSTRAINT);
-                ConnectorSecurityContext context = new ConnectorSecurityContext(
-                        new JdbcTransactionHandle(),
-                        ConnectorIdentity.ofUser("test"),
-                        new QueryId("native_execute"));
-                assertTrinoExceptionThrownBy(() -> connector.getAccessControl()
-                        .checkCanExecuteProcedure(context, new SchemaRoutineName("system", "execute")))
-                        .hasErrorCode(NOT_SUPPORTED);
-                connector.getAccessControl().checkCanExecuteProcedure(context, new SchemaRoutineName("system", "flush_metadata_cache"));
             }
             finally {
                 connector.shutdown();

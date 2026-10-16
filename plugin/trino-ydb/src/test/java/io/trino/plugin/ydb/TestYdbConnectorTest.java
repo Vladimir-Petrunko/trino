@@ -31,8 +31,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 
+import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.testing.TestingNames.randomNameSuffix;
+import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @ResourceLock("YDB_HELPER")
 public class TestYdbConnectorTest
@@ -67,13 +72,9 @@ public class TestYdbConnectorTest
     {
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_TABLE,
-                 SUPPORTS_INSERT,
                  SUPPORTS_UPDATE,
                  SUPPORTS_DELETE,
                  SUPPORTS_MERGE,
-                 SUPPORTS_ADD_COLUMN,
-                 SUPPORTS_RENAME_TABLE,
-                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
                  SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN,
                  SUPPORTS_AGGREGATION_PUSHDOWN,
                  SUPPORTS_TOPN_PUSHDOWN,
@@ -101,8 +102,211 @@ public class TestYdbConnectorTest
                  SUPPORTS_SET_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_DROP_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT -> false;
+            case SUPPORTS_ADD_COLUMN,
+                 SUPPORTS_DROP_COLUMN,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT -> true;
             default -> super.hasBehavior(connectorBehavior);
         };
+    }
+
+    @Override
+    protected String tableDefinitionForAddColumn()
+    {
+        return "(x varchar) WITH (primary_key = ARRAY['x'])";
+    }
+
+    @Override
+    protected String createTableSqlForAddingAndDroppingColumn(String tableName, String columnNameInSql)
+    {
+        return super.createTableSqlForAddingAndDroppingColumn(tableName, columnNameInSql) + " WITH (primary_key = ARRAY['value'])";
+    }
+
+    @Test
+    @Override
+    public void testAlterTableAddLongColumnName()
+    {
+        String tableName = "test_long_column" + randomNameSuffix();
+        String createTable = "CREATE TABLE " + tableName + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x";
+        String validColumnName = "col" + "z".repeat(maxColumnNameLength().orElseThrow() - 3);
+        assertUpdate(createTable, 1);
+        try {
+            assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN " + validColumnName + " int");
+            assertThat(getQueryRunner().tableExists(getSession(), tableName)).isTrue();
+            assertQuery("SELECT x FROM " + tableName, "VALUES 123");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+
+        assertUpdate(createTable, 1);
+        try {
+            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN " + validColumnName + "z int"))
+                    .satisfies(this::verifyColumnNameLengthFailurePermissible);
+            assertQuery("SELECT x FROM " + tableName, "VALUES 123");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Override
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception exception)
+    {
+        // Overlapping YDB scheme operations on one table may report OVERLOADED.
+        // https://ydb.tech/docs/en/reference/ydb-sdk/ydb-status-codes
+        assertThat(exception)
+                .hasMessageContaining("Status{code = OVERLOADED(code=400060)")
+                .hasMessageContaining("error: path is under operation")
+                .hasMessageContaining("state: EPathStateAlter");
+    }
+
+    // Generic DDL fixtures omit YDB's mandatory primary key.
+    // https://ydb.tech/docs/en/yql/reference/syntax/create_table/
+    @Test
+    @Override
+    public void testAddNotNullColumnToEmptyTable()
+    {
+        try (TestTable table = newTrinoTable("test_add_nn_to_empty", "(a_varchar varchar) WITH (primary_key = ARRAY['a_varchar'])")) {
+            assertThat(query("ALTER TABLE " + table.getName() + " ADD COLUMN b_varchar varchar NOT NULL"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertTableColumnNames(table.getName(), "a_varchar");
+            assertThat(query("SELECT * FROM " + table.getName())).returnsEmptyResult();
+        }
+    }
+
+    @Test
+    @Override
+    public void testAddColumnWithPosition()
+    {
+        try (TestTable table = newTrinoTable("test_add_column_", "WITH (primary_key = ARRAY['second']) AS SELECT 2 second, 4 fourth")) {
+            assertQueryFails(
+                    "ALTER TABLE " + table.getName() + " ADD COLUMN first integer FIRST",
+                    "This connector does not support adding columns with FIRST clause");
+            assertQueryFails(
+                    "ALTER TABLE " + table.getName() + " ADD COLUMN third integer AFTER second",
+                    "This connector does not support adding columns with AFTER clause");
+            assertTableColumnNames(table.getName(), "second", "fourth");
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (2, 4)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testDropColumn()
+    {
+        String tableName;
+        try (TestTable table = newTrinoTable("test_drop_column_", "WITH (primary_key = ARRAY['a']) AS SELECT 123 x, 456 y, 111 a")) {
+            tableName = table.getName();
+            assertThat(query("ALTER TABLE " + tableName + " DROP COLUMN a"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertUpdate("ALTER TABLE " + tableName + " DROP COLUMN x");
+            assertUpdate("ALTER TABLE " + tableName + " DROP COLUMN IF EXISTS y");
+            assertUpdate("ALTER TABLE " + tableName + " DROP COLUMN IF EXISTS notExistColumn");
+            assertQueryFails("SELECT x FROM " + tableName, ".* Column 'x' cannot be resolved");
+            assertQueryFails("SELECT y FROM " + tableName, ".* Column 'y' cannot be resolved");
+            assertQuery("SELECT a FROM " + tableName, "VALUES 111");
+            assertQueryFails("ALTER TABLE " + tableName + " DROP COLUMN a", ".* Cannot drop the only column in a table");
+        }
+
+        assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+        assertUpdate("ALTER TABLE IF EXISTS " + tableName + " DROP COLUMN notExistColumn");
+        assertUpdate("ALTER TABLE IF EXISTS " + tableName + " DROP COLUMN IF EXISTS notExistColumn");
+        assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+    }
+
+    @Test
+    @Override
+    public void testDropAndAddColumnWithSameName()
+    {
+        try (TestTable table = newTrinoTable("test_drop_add_column", "WITH (primary_key = ARRAY['x']) AS SELECT 1 x, 2 y, 3 z")) {
+            assertUpdate("ALTER TABLE " + table.getName() + " DROP COLUMN y");
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 3)");
+            assertUpdate("ALTER TABLE " + table.getName() + " ADD COLUMN y int");
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES (1, 3, NULL)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testDropNotNullConstraint()
+    {
+        try (TestTable table = newTrinoTable("test_drop_not_null_", "(id bigint NOT NULL, col integer NOT NULL) WITH (primary_key = ARRAY['id'])")) {
+            assertThat(columnIsNullable(table.getName(), "col")).isFalse();
+            assertThat(query("ALTER TABLE " + table.getName() + " ALTER COLUMN id DROP NOT NULL"))
+                    .failure().hasErrorCode(NOT_SUPPORTED);
+            assertThat(columnIsNullable(table.getName(), "id")).isFalse();
+
+            assertUpdate("ALTER TABLE " + table.getName() + " ALTER COLUMN col DROP NOT NULL");
+            assertThat(columnIsNullable(table.getName(), "col")).isTrue();
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES (1, NULL)", 1);
+            assertQuery("SELECT id, col FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), NULL)");
+        }
+    }
+
+    @Test
+    @Override
+    public void testRenameTable()
+    {
+        String tableName = "test_rename_" + randomNameSuffix();
+        String renamedTable = "test_rename_new_" + randomNameSuffix();
+        String testExistsTableName = "test_rename_exists_" + randomNameSuffix();
+        String uppercaseName = "TEST_RENAME_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x", 1);
+        try {
+            assertUpdate("ALTER TABLE " + tableName + " RENAME TO " + renamedTable);
+            assertQuery("SELECT x FROM " + renamedTable, "VALUES 123");
+            assertUpdate("ALTER TABLE IF EXISTS " + renamedTable + " RENAME TO " + testExistsTableName);
+            assertQuery("SELECT x FROM " + testExistsTableName, "VALUES 123");
+            assertUpdate("ALTER TABLE " + testExistsTableName + " RENAME TO " + uppercaseName);
+            assertQuery("SELECT x FROM " + uppercaseName.toLowerCase(ENGLISH), "VALUES 123");
+            assertUpdate("DROP TABLE " + uppercaseName);
+
+            assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+            assertThat(getQueryRunner().tableExists(getSession(), renamedTable)).isFalse();
+            assertUpdate("ALTER TABLE IF EXISTS " + tableName + " RENAME TO " + renamedTable);
+            assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+            assertThat(getQueryRunner().tableExists(getSession(), renamedTable)).isFalse();
+        }
+        finally {
+            for (String name : List.of(tableName, renamedTable, testExistsTableName, uppercaseName)) {
+                assertUpdate("DROP TABLE IF EXISTS " + name);
+            }
+        }
+    }
+
+    @Test
+    @Override
+    public void testRenameTableToLongTableName()
+    {
+        int maxLength = maxTableRenameLength().orElseThrow();
+        String baseTableName = "test_rename_target_" + randomNameSuffix();
+        String validTargetTableName = baseTableName + "z".repeat(maxLength - baseTableName.length());
+        String invalidTargetTableName = validTargetTableName + "z";
+
+        String sourceTableName1 = "test_rename_source_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + sourceTableName1 + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x", 1);
+        try {
+            assertUpdate("ALTER TABLE " + sourceTableName1 + " RENAME TO " + validTargetTableName);
+            assertThat(getQueryRunner().tableExists(getSession(), validTargetTableName)).isTrue();
+            assertQuery("SELECT x FROM " + validTargetTableName, "VALUES 123");
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + validTargetTableName);
+            assertUpdate("DROP TABLE IF EXISTS " + sourceTableName1);
+        }
+
+        String sourceTableName2 = "test_rename_source_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + sourceTableName2 + " WITH (primary_key = ARRAY['x']) AS SELECT 123 x", 1);
+        try {
+            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + sourceTableName2 + " RENAME TO " + invalidTargetTableName))
+                    .satisfies(this::verifyTableNameLengthFailurePermissible);
+            assertThat(getQueryRunner().tableExists(getSession(), invalidTargetTableName)).isFalse();
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + invalidTargetTableName);
+            assertUpdate("DROP TABLE IF EXISTS " + sourceTableName2);
+        }
     }
 
     @Override
@@ -122,7 +326,7 @@ public class TestYdbConnectorTest
                 || trinoTypeName.equals("time(6)")
                 || trinoTypeName.equals("timestamp(3) with time zone")
                 || trinoTypeName.equals("timestamp(6) with time zone")) {
-            // Нет time в YQL
+            // YQL has no TIME type.
             return Optional.empty();
         }
         return Optional.of(dataMappingTestSetup);
@@ -140,7 +344,7 @@ public class TestYdbConnectorTest
     @Override
     protected MaterializedResult getDescribeOrdersResult()
     {
-        // В YQL строки произвольной длины
+        // YQL strings have unbounded length.
         return MaterializedResult.resultBuilder(this.getSession(), new Type[] {VarcharType.VARCHAR, VarcharType.VARCHAR, VarcharType.VARCHAR, VarcharType.VARCHAR}).row(new Object[] {"orderkey", "bigint", "", ""}).row(new Object[] {"custkey", "bigint", "", ""}).row(new Object[] {"orderstatus", "varchar", "", ""}).row(new Object[] {"totalprice", "double", "", ""}).row(new Object[] {"orderdate", "date", "", ""}).row(new Object[] {"orderpriority", "varchar", "", ""}).row(new Object[] {"clerk", "varchar", "", ""}).row(new Object[] {"shippriority", "integer", "", ""}).row(new Object[] {"comment", "varchar", "", ""}).build();
     }
 
@@ -148,10 +352,10 @@ public class TestYdbConnectorTest
     @Override
     public void testShowCreateTable()
     {
-        // В YQL строки произвольной длины
+        // YQL strings have unbounded length.
         String catalog = this.getSession().getCatalog().orElseThrow();
         String schema = this.getSession().getSchema().orElseThrow();
-        Assertions.assertThat(this.computeScalar("SHOW CREATE TABLE orders")).isEqualTo(String.format("CREATE TABLE %s.%s.orders (\n   orderkey bigint,\n   custkey bigint,\n   orderstatus varchar,\n   totalprice double,\n   orderdate date,\n   orderpriority varchar,\n   clerk varchar,\n   shippriority integer,\n   comment varchar\n)", catalog, schema));
+        Assertions.assertThat(this.computeScalar("SHOW CREATE TABLE orders")).isEqualTo(String.format("CREATE TABLE %s.%s.orders (\n   orderkey bigint,\n   custkey bigint,\n   orderstatus varchar,\n   totalprice double,\n   orderdate date,\n   orderpriority varchar,\n   clerk varchar,\n   shippriority integer,\n   comment varchar\n)\nWITH (\n   primary_key = ARRAY['orderkey']\n)", catalog, schema));
     }
 
     @Override
@@ -198,7 +402,7 @@ public class TestYdbConnectorTest
     }
 
     @Test
-    public void testReadOnlyWritesRejected()
+    public void testUnsupportedMutationsRejected()
     {
         JdbcSqlExecutor executor = new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb));
         try (TestTable table = new TestTable(
@@ -206,25 +410,140 @@ public class TestYdbConnectorTest
                 "read_only_",
                 "(id Int64, value Utf8, PRIMARY KEY (id))")) {
             executor.execute("INSERT INTO " + table.getName() + " (id, value) VALUES (1, 'original'u)");
-            String copy = table.getName() + "_copy";
-            try {
-                for (String sql : List.of(
-                        "CREATE TABLE " + copy + " (id bigint)",
-                        "INSERT INTO " + table.getName() + " VALUES (2, 'new')",
-                        "UPDATE " + table.getName() + " SET value = 'changed' WHERE id = 1",
-                        "DELETE FROM " + table.getName() + " WHERE id = 1",
-                        "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
-                                "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
-                        "ALTER TABLE " + table.getName() + " ADD COLUMN added bigint",
-                        "ALTER TABLE " + table.getName() + " RENAME TO " + copy,
-                        "DROP TABLE " + table.getName())) {
-                    assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
-                }
-                assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), 'original')");
+            for (String sql : List.of(
+                    "UPDATE " + table.getName() + " SET value = 'changed' WHERE id = 1",
+                    "DELETE FROM " + table.getName() + " WHERE id = 1",
+                    "MERGE INTO " + table.getName() + " t USING (VALUES (1, 'changed')) s(id, value) " +
+                            "ON t.id = s.id WHEN MATCHED THEN UPDATE SET value = s.value",
+                    "ALTER TABLE " + table.getName() + " RENAME COLUMN value TO renamed_value")) {
+                assertThat(query(sql)).failure().hasErrorCode(NOT_SUPPORTED);
             }
-            finally {
-                executor.execute("DROP TABLE IF EXISTS " + copy);
-            }
+            assertQuery("SELECT id, value FROM " + table.getName(), "VALUES (CAST(1 AS BIGINT), 'original')");
+        }
+    }
+
+    // YQL requires a PRIMARY KEY; generic property-free CREATE is not the connector contract.
+    // https://ydb.tech/docs/en/yql/reference/syntax/create_table/
+    @Test
+    @Override
+    public void testCreateTable()
+    {
+        assertThat(query("CREATE TABLE create_without_primary_key (id bigint)"))
+                .failure().hasErrorCode(INVALID_TABLE_PROPERTY);
+    }
+
+    @Test
+    @Override
+    public void testCreateTableAsSelect()
+    {
+        assertThat(query("CREATE TABLE ctas_without_primary_key AS SELECT BIGINT '42' id"))
+                .failure().hasErrorCode(INVALID_TABLE_PROPERTY);
+    }
+
+    @Test
+    @Override
+    public void testInsert()
+    {
+        String query = "SELECT name, nationkey, regionkey FROM nation";
+        try (TestTable table = newTrinoTable("test_insert_", "(name varchar, nationkey bigint, regionkey bigint) " +
+                "WITH (primary_key = ARRAY['nationkey', 'name', 'regionkey'])")) {
+            assertQuery("SELECT count(*) FROM " + table.getName(), "VALUES 0");
+            assertUpdate("INSERT INTO " + table.getName() + " " + query, 25);
+            assertQuery("SELECT * FROM " + table.getName(), query);
+            assertUpdate("INSERT INTO " + table.getName() + " (nationkey) VALUES (-1)", 1);
+            assertUpdate("INSERT INTO " + table.getName() + " (nationkey) VALUES (null)", 1);
+            assertUpdate("INSERT INTO " + table.getName() + " (name) VALUES ('name-dummy-1')", 1);
+            assertUpdate("INSERT INTO " + table.getName() + " (nationkey, name) VALUES (-2, 'name-dummy-2')", 1);
+            assertUpdate("INSERT INTO " + table.getName() + " (name, nationkey) VALUES ('name-dummy-3', -3)", 1);
+            assertUpdate("INSERT INTO " + table.getName() + " (regionkey) VALUES (1234)", 1);
+            String expected = query + " UNION ALL SELECT null, -1, null UNION ALL SELECT null, null, null " +
+                    "UNION ALL SELECT 'name-dummy-1', null, null UNION ALL SELECT 'name-dummy-2', -2, null " +
+                    "UNION ALL SELECT 'name-dummy-3', -3, null UNION ALL SELECT null, null, 1234";
+            assertQuery("SELECT * FROM " + table.getName(), expected);
+            // YDB's explicit primary key rejects duplicate rows instead of creating an unkeyed bag.
+            assertThat(query("INSERT INTO " + table.getName() + " (nationkey, name, regionkey) " +
+                    "SELECT nationkey, name, regionkey FROM nation UNION ALL SELECT nationkey, name, regionkey FROM nation"))
+                    .failure().hasErrorCode(JDBC_ERROR);
+            assertQuery("SELECT * FROM " + table.getName(), expected);
+        }
+    }
+
+    @Override
+    protected TestTable createTableWithDefaultColumns()
+    {
+        return new TestTable(
+                new JdbcSqlExecutor(YdbQueryRunner.buildJdbcUrl(ydb)),
+                "test_insert_default_",
+                "(col_required Int64 NOT NULL, " +
+                        "col_nullable Int64, " +
+                        "col_default Int64 DEFAULT 43, " +
+                        "col_nonnull_default Int64 NOT NULL DEFAULT 42, " +
+                        "col_required2 Int64 NOT NULL, " +
+                        "PRIMARY KEY (col_required))");
+    }
+
+    @Test
+    @Override
+    public void testInsertUnicode()
+    {
+        try (TestTable table = newTrinoTable("test_insert_unicode_", "(test varchar(50)) WITH (primary_key = ARRAY['test'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + "(test) VALUES 'Hello', U&'hello\\6d4B\\8Bd5world\\7F16\\7801' ", 2);
+            assertThat(computeActual("SELECT test FROM " + table.getName()).getOnlyColumnAsSet())
+                    .containsExactlyInAnyOrder("Hello", "hello测试world编码");
+        }
+
+        try (TestTable table = newTrinoTable("test_insert_unicode_", "(test varchar(50)) WITH (primary_key = ARRAY['test'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + "(test) VALUES 'aa', 'bé'", 2);
+            assertQuery("SELECT test FROM " + table.getName(), "VALUES 'aa', 'bé'");
+            assertQuery("SELECT test FROM " + table.getName() + " WHERE test = 'aa'", "VALUES 'aa'");
+            assertQuery("SELECT test FROM " + table.getName() + " WHERE test > 'ba'", "VALUES 'bé'");
+            assertQuery("SELECT test FROM " + table.getName() + " WHERE test < 'ba'", "VALUES 'aa'");
+            assertQueryReturnsEmptyResult("SELECT test FROM " + table.getName() + " WHERE test = 'ba'");
+        }
+
+        try (TestTable table = newTrinoTable("test_insert_unicode_", "(test varchar(50)) WITH (primary_key = ARRAY['test'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + "(test) VALUES 'a', 'é'", 2);
+            assertQuery("SELECT test FROM " + table.getName(), "VALUES 'a', 'é'");
+            assertQuery("SELECT test FROM " + table.getName() + " WHERE test = 'a'", "VALUES 'a'");
+            assertQuery("SELECT test FROM " + table.getName() + " WHERE test > 'b'", "VALUES 'é'");
+            assertQuery("SELECT test FROM " + table.getName() + " WHERE test < 'b'", "VALUES 'a'");
+            assertQueryReturnsEmptyResult("SELECT test FROM " + table.getName() + " WHERE test = 'b'");
+        }
+    }
+
+    @Test
+    @Override
+    public void testInsertHighestUnicodeCharacter()
+    {
+        try (TestTable table = newTrinoTable("test_insert_unicode_", "(test varchar(50)) WITH (primary_key = ARRAY['test'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + "(test) VALUES 'Hello', U&'hello\\6d4B\\8Bd5\\+10FFFFworld\\7F16\\7801' ", 2);
+            assertThat(computeActual("SELECT test FROM " + table.getName()).getOnlyColumnAsSet())
+                    .containsExactlyInAnyOrder("Hello", "hello测试􏿿world编码");
+        }
+    }
+
+    @Override
+    protected TestTable createTableWithOneIntegerColumn(String namePrefix)
+    {
+        return newTrinoTable(namePrefix, "(col integer) WITH (primary_key = ARRAY['col'])");
+    }
+
+    @Test
+    @Override
+    public void testInsertArray()
+    {
+        assertThat(query("CREATE TABLE insert_array_unsupported (id bigint, value array(bigint)) WITH (primary_key = ARRAY['id'])"))
+                .failure().hasErrorCode(NOT_SUPPORTED);
+    }
+
+    @Test
+    @Override
+    public void testInsertNegativeDate()
+    {
+        try (TestTable table = newTrinoTable("insert_date", "(id bigint, dt date) WITH (primary_key = ARRAY['id'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES (1, DATE '-0001-01-01')", 1);
+            assertQuery("SELECT dt FROM " + table.getName(), "VALUES DATE '-0001-01-01'");
+            assertQuery("SELECT dt FROM " + table.getName() + " WHERE dt = DATE '-0001-01-01'", "VALUES DATE '-0001-01-01'");
         }
     }
 }
